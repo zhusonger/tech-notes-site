@@ -1,10 +1,100 @@
 # Tech Notes · 个人技术主页
 
+![License](https://img.shields.io/badge/license-MIT-green) ![Node](https://img.shields.io/badge/node-%E2%89%A5%2026-blue) ![React](https://img.shields.io/badge/React-18.3-61dafb) ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6) ![TailwindCSS](https://img.shields.io/badge/TailwindCSS-v4-38bdf8)
+
 暖米白 + 橙色的个人技术主页，前台 5 个页面（首页、博客列表、博客详情、项目、简历），
 外加一套 `/admin` 内容管理后台。前端工程按一份界面设计稿实现，采用响应式重排。
 
 前台本身是纯静态产物；后台需要服务端（httpOnly 会话、SQLite、TOTP）。因此整站由
 **同一个 Express 进程**同时提供 API 与静态文件 —— 同源才不必处理跨站凭证与 CORS。
+
+## 预览
+
+**前台**
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/home.jpg" alt="首页"></td>
+    <td width="50%"><img src="docs/screenshots/blog.jpg" alt="博客列表"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/article.jpg" alt="文章详情"></td>
+    <td><img src="docs/screenshots/projects.jpg" alt="项目"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/resume.jpg" alt="简历"></td>
+    <td><img src="docs/screenshots/admin-login.jpg" alt="后台登录"></td>
+  </tr>
+</table>
+
+**后台**
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/admin-dashboard.jpg" alt="仪表盘"></td>
+    <td width="50%"><img src="docs/screenshots/admin-posts.jpg" alt="文章列表"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/admin-post-editor.jpg" alt="文章编辑器"></td>
+    <td><img src="docs/screenshots/admin-projects.jpg" alt="项目管理"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/admin-home.jpg" alt="首页内容编辑"></td>
+    <td><img src="docs/screenshots/admin-resume.jpg" alt="简历编辑"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/admin-media.jpg" alt="媒体库"></td>
+    <td><img src="docs/screenshots/admin-taxonomy.jpg" alt="分类与标签"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/admin-visitors.jpg" alt="访客记录"></td>
+    <td><img src="docs/screenshots/admin-audit.jpg" alt="操作日志"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="docs/screenshots/admin-settings.jpg" alt="站点设置"></td>
+  </tr>
+</table>
+
+## 特性
+
+- **前台 5 页 + 后台 14 屏**：仪表盘、文章列表与编辑器、项目卡片墙、首页内容、简历编辑、
+  媒体库、分类与标签、访客记录、操作日志、站点设置、账号设置与安全、TOTP 两步验证。
+- **内容只有一个来源**：后台数据库。种子内容与前台兜底同源（`shared/content.mjs`），
+  接口挂掉时前台照常渲染并明示降级，不会白屏也不会展示过期内容。
+- **安全默认值**：helmet、CSRF 同源校验、登录限流、TOTP 两步验证与恢复码、
+  白名单式审计日志；正文渲染走 React 节点，不拼 HTML 字符串，注入面为零。
+- **访客统计不送数据**：归属地用离线库解析（不出网、不调第三方），明文明细仅登录可见、
+  30 天自动清理，匿名趋势只存哈希。
+- **零外部服务依赖**：Node 26 原生 `node:sqlite`，无 ORM、无对象存储、无第三方数据库，
+  一个容器（或一个进程）即可完整运行。
+
+## 部署方式
+
+| 方式 | 适合场景 | 命令 |
+| --- | --- | --- |
+| **Docker（推荐）** | VPS / NAS，长期运行 | `docker build -t tech-notes-site .` → 见[容器化部署](#容器化部署) |
+| **Node 直跑** | 已装 Node ≥ 26 的机器 | `npm ci && npm run build && npm start` |
+| **静态预览** | 只看前台、不起后台 | `npm run serve`（零依赖，无 `/api`） |
+
+三种方式的详细展开见下方[容器化部署](#容器化部署)、[本机快速预览（不建容器）](#本机快速预览不建容器)两节。
+
+### 环境变量
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `PORT` | `18007` | 监听端口 |
+| `HOST` | 仅本机可访问的绑定地址 | 对外服务时改为 `0.0.0.0` |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | 未提供则随机生成（只打印一次） | 首次启动创建管理员 |
+| `DB_PATH` | `data/tech-notes.db` | SQLite 库路径，指向持久目录 |
+| `UPLOAD_DIR` | `data/uploads` | 媒体上传目录，随 `/uploads/*` 托管 |
+| `APP_SECRET` / `APP_SECRET_FILE` | 自动生成 `data/.app-secret` | 2FA 主密钥，丢了已绑定的两步验证解不开 |
+| `TRUST_PROXY` | `1` | 反向代理层数，设错会把所有访客 IP 记成代理地址 |
+| `IP2REGION_XDB` | 自动按需获取 | 离线地区库路径（约 11 MB，可 `npm run fetch:geo` 预热） |
+
+### 数据持久化
+
+首次启动会在项目根创建 `data/`（SQLite 库、2FA 主密钥、媒体上传）。**换一次目录就换一份数据**，
+部署时务必把它挂载/固定到持久卷；它已被 `.gitignore` 按 `/data/` 排除，绝不入库。
 
 ## 技术栈
 
