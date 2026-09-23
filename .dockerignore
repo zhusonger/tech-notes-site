@@ -1,0 +1,19 @@
+# 构建上下文瘦身：镜像里要的是源码 + 构建产物，其余一律不进上下文
+.git
+.gitignore
+node_modules
+dist
+dist-ssr
+logs
+*.log
+.DS_Store
+.vite
+*.local
+
+# 与运行无关的文件：文档与开发期校验脚本，运行时不读它们
+README.md
+scripts/ssr-check.tsx
+
+# 运行期数据：本机 SQLite 库与 2FA 主密钥。绝不进构建上下文 ——
+# 进了上下文就有被 COPY . . 带进镜像层的风险，等于把后台凭证体系打进镜像。
+data

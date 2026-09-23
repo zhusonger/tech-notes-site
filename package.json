@@ -1,0 +1,37 @@
+{
+  "name": "tech-notes-site",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "serve": "node scripts/serve.mjs",
+    "start": "node server/index.mjs",
+    "deploy:local": "npm run build && npm start",
+    "fetch:geo": "node scripts/fetch-geo.mjs",
+    "typecheck": "tsc --noEmit",
+    "check:routes": "vite build --ssr scripts/ssr-check.tsx --outDir dist-ssr --logLevel warn && node dist-ssr/ssr-check.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.7.0",
+    "helmet": "^8.3.0",
+    "otplib": "^13.5.0",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/node": "^26.6.2",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}

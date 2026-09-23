@@ -1,0 +1,82 @@
+@import "tailwindcss";
+
+:root {
+  /* Brand */
+  --color-primary: #f26b1d;
+  --color-primary-deep: #d2560f;
+  --color-primary-soft: #fdf0e7;
+
+  /* Surfaces */
+  --color-bg: #ffffff;
+  --color-bg-soft: #fcfaf8;
+  --color-bg-warm: #fdfaf7;
+  /* 文章卡片上的分类标签底色（画布 726775085435150 节点 3:461 实测） */
+  --color-tag-bg: #f6f3ef;
+
+  /* Text */
+  --color-ink: #1a1714;
+  --color-ink-2: #5a544e;
+  --color-ink-3: #8c857d;
+  /* 卡片元信息（日期 / 阅读量）比 ink-3 再浅一档，取自画布 3:466、3:467 */
+  --color-ink-4: #a8a19a;
+
+  /* Lines */
+  --color-line: #ede8e1;
+  --color-line-soft: #f4f0ea;
+
+  /* Inverted footer */
+  --color-footer-bg: #1a1714;
+  --color-footer-ink: #f5f1ec;
+  --color-footer-ink-2: #a49d95;
+
+  /* Metrics */
+  --content-width: 1312px;
+
+  /*
+   * 后台控制台专有色调。
+   * 取值直接来自后台设计稿（画布 726775085435150）的实测填充色，
+   * 后台比前台更「工具化」：底色下沉一档、卡片纯白浮起、弱化色再浅一层。
+   */
+  --admin-canvas: #f8f5f1; /* 页面底色（卡片之下的画布） */
+  --admin-surface: #ffffff; /* 卡片 / 顶栏 / 侧边栏 */
+  --admin-soft: #f4f1ec; /* 输入框 / 悬停态 / 提示条 */
+  --admin-soft-strong: #f1ece6; /* 进度条底槽 / 弱描边 / 禁用态 */
+  --admin-readonly: #faf7f4; /* 只读值块（比输入框再浅一档，避免看起来可编辑） */
+  --admin-placeholder: #a8a19a; /* 占位文字 / 导航分组标题 / 弱图标 */
+}
+
+@layer base {
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    background-color: var(--color-bg);
+    color: var(--color-ink);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .font-primary {
+    font-family: "Inter", "Noto Sans SC", system-ui, -apple-system, sans-serif;
+  }
+
+  .font-cn {
+    font-family: "Noto Sans SC", "Inter", system-ui, -apple-system, sans-serif;
+  }
+
+  .font-latin {
+    font-family: "Inter", system-ui, -apple-system, sans-serif;
+  }
+
+  .font-code {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  /*
+   * 不做全局的「透明选区」。站点内容默认允许正常选中与复制；
+   * 唯一需要禁止复制的「简历正文」由 ResumeSection 组件自身的
+   * `select-none` + onCopy/onContextMenu 拦截来实现，不在这里全局化。
+   */
+}
+

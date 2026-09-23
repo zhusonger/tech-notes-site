@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" role="img" aria-label="默认封面">
+  <!--
+    没有配图时的默认封面。
+
+    为什么是一张**真实文件**而不是纯底色块：卡片上的封面位是固定高度的
+    （列表卡 198、首页条目 86），拿掉图不会让版面变矮，只会留下一个灰块 ——
+    而 `src=""` 更糟，浏览器会画成破图图标外加一段 alt 文字。留空不是
+    「什么都没有」，是「一张坏掉的图」。所以这里给一张中性的图：不下沉版面，
+    也不冒充真实配图（大号站点标记 + 低对比暖底，一眼看得出是占位）。
+
+    不写任何文字：这份资源在开源副本里要能直接用，图里的字没法本地化，
+    也没法跟着站点改名。标记本身就是品牌，语言无关。
+
+    1200×630 是后台封面区块标注的规格；显示时按 object-cover 裁剪，
+    因此主体一律居中，窄到 86px 高的缩略图也不会被裁掉。
+  -->
+  <defs>
+    <linearGradient id="coverBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fdfaf7" />
+      <stop offset="1" stop-color="#fdf0e7" />
+    </linearGradient>
+    <pattern id="coverDots" width="34" height="34" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.7" fill="#f26b1d" opacity="0.13" />
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#coverBg)" />
+  <rect width="1200" height="630" fill="url(#coverDots)" />
+
+  <!-- 站点标记（与 favicon.svg 同一形状），放大到头像尺度的水印 -->
+  <g transform="translate(492 207) scale(9)" opacity="0.9">
+    <rect width="24" height="24" rx="5.5" fill="#f26b1d" opacity="0.10" />
+    <path d="M7.4 16.8C6.6 10.2 11.8 6.6 17 7c.6 6.4-4.4 10.2-9.6 9.8Z" fill="#f26b1d" opacity="0.34" />
+    <circle cx="5.6" cy="18.8" r="1.75" fill="#f26b1d" opacity="0.34" />
+  </g>
+</svg>

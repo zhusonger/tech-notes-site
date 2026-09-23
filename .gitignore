@@ -1,0 +1,25 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+.vite
+logs
+*.log
+
+# Vite 加载 vite.config.ts 时落下的临时编译文件，正常情况下自己会清掉；
+# 进程被强杀（Ctrl+C / pkill）时会残留，每次都污染 git status。
+vite.config.ts.timestamp-*
+
+# 运行时数据：SQLite 库、会话、以及 .app-secret（2FA 密钥加密主密钥）。
+# 一旦入库等于把后台凭证体系公开，必须永久排除。
+# 注意必须写成根锚定的 /data/ —— 裸写 data/ 会连 src/data/ 一起忽略掉。
+/data/
+
+# 镜像构建用的离线地区库落点（scripts/fetch-geo.mjs --out vendor）。
+# 与 data/ 同理：这是可重新下载的公开数据，不进版本库。
+/vendor/
+
+# 手工备份落点（sqlite3 .backup / VACUUM INTO 的输出）。
+# 与 /data/ 同理，而且更危险：备份是全量快照，一旦入库等于把整库公开。
+/backups/
