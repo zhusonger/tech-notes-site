@@ -142,6 +142,61 @@ export interface PostListResponse {
   totalPages: number
 }
 
+/* ------------------------------------------------------------- 批量操作 */
+
+/** 批量动作里被跳过的一条。`reason` 由服务端给 —— 跳过与否是服务端说了算的 */
+export interface BulkSkipped {
+  id: number
+  /** 已经带上书名号或就是文件名，直接上屏 */
+  label: string
+  reason: string
+}
+
+/**
+ * 选中范围：两种形状**互斥**，与服务端 `readBulkPayload` 是一对一的。
+ *
+ * 用 discriminated union 而不是「两个可选字段」是有意的：后者允许同时给出
+ * `{ ids: [...], filter: {...} }`，而那正是服务端会拒绝的组合 —— 类型上说得通、
+ * 运行时才炸，是最亏的一种。**让不可能的情况不可表达。**
+ */
+export type BulkScope =
+  | { ids: number[] }
+  | { filter: Record<string, string>; exclude: number[]; expected: number }
+
+/** 文章批量：五个状态类动作，都不需要表单输入 */
+export type PostBulkAction = 'publish' | 'unpublish' | 'trash' | 'restore' | 'delete'
+
+/** 项目批量：两个开关（发布 / 精选）各两个方向，加上删除 */
+export type ProjectBulkAction = 'publish' | 'unpublish' | 'feature' | 'unfeature' | 'delete'
+
+/** 批量回执共有的三个字段，三屏一致 */
+interface BulkOutcome {
+  /** 真正改到 / 删掉的条数。`affected + skipped.length` ＝ 这一批的总数 */
+  affected: number
+  /** 被跳过的一条一条，理由由服务端给 —— 跳过与否是服务端说了算的 */
+  skipped: BulkSkipped[]
+  /** 本次实际使用的范围：`ids` 还是 `filter`（后者就是「按当前筛选全选」） */
+  scope: 'ids' | 'filter'
+  /** filter 模式下这一批的总数，便于界面回 confirmation */
+  total: number | null
+}
+
+export interface BulkPostResponse extends BulkOutcome {
+  action: PostBulkAction
+  counts: PostCounts
+}
+
+export interface BulkProjectResponse extends BulkOutcome, ProjectFacets {
+  action: ProjectBulkAction
+}
+
+export interface BulkMediaResponse extends BulkOutcome, MediaFacets {
+  action: 'delete'
+  /** 真的 unlink 掉的文件数。库里那一行删掉但磁盘没有副本的（随构建发布）不计入 */
+  fileRemoved: number
+  removedReferences: number
+}
+
 /**
  * 编辑器取到的单篇：比列表项多正文、SEO 描述与标签关联。
  * 这三样在列表里用不到，若并进列表项，列表每行都要白背一份正文。
@@ -609,12 +664,28 @@ export interface MediaReference {
   href: string
 }
 
+/**
+ * 文件来源。决定「删得掉吗」：
+ * `upload` 是后台上传、落在持久卷上，删了就是真没了；
+ * `build` 随构建产物发布、本体在版本库里，运行期删掉会在下次构建时回来 —— 不可删。
+ * `other` 是地址不在受管前缀里的登记项，磁盘上没有副本。
+ */
+export type MediaOrigin = 'upload' | 'build' | 'other'
+
+/** 来源这一档的策略：标签、可删与否、不可删时给出的理由。全部由服务端下发。 */
+export interface MediaOriginRule {
+  label: string
+  removable: boolean
+  hint: string | null
+}
+
 export interface MediaItem {
   id: number
   filename: string
   url: string
   mime: string
   kind: MediaKind
+  origin: MediaOrigin
   bytes: number
   bytesLabel: string
   /** 只有 PNG 能读出尺寸，其余是 null —— 界面显示「—」，不猜 */
@@ -643,7 +714,14 @@ export interface MediaListResponse extends MediaFacets {
   kinds: { key: MediaKind; label: string }[]
   sorts: { value: MediaSortKey; label: string }[]
   /** 上传白名单与各项上限来自服务端：界面上的提示与拒收用的是同一份 */
-  policy: { accept: string; hint: string; maxBytes: number; maxAlt: number }
+  policy: {
+    accept: string
+    hint: string
+    maxBytes: number
+    maxAlt: number
+    /** 来源策略同上：界面上「随构建发布」的徽标与删除按钮的禁用状态都读它 */
+    origins: Record<MediaOrigin, MediaOriginRule>
+  }
 }
 
 export interface MediaSaveResponse extends MediaFacets {
@@ -655,6 +733,8 @@ export interface MediaDeleteResponse extends MediaFacets {
   deleted: true
   id: number
   fileRemoved: boolean
+  /** 被删掉的那一条的来源，用于回执里说清「文件是否也删了」 */
+  origin: MediaOrigin
   removedReferences: number
 }
 
@@ -817,6 +897,16 @@ export const adminApi = {
   deletePost: (id: number) =>
     request<{ deleted: true; id: number; counts?: PostCounts }>('DELETE', `/admin/posts/${id}`),
 
+  /**
+   * 批量流转 / 批量彻底删除。
+   *
+   * 三屏共用同一套形状（见 `server/api.mjs` 的「批量操作（三屏共用）」）：
+   * 一个 `scope` + 一个 `action`，回执里 `affected` 与 `skipped` 是逐条的账，
+   * 不做全有或全无 —— 选中 20 条里混进 1 条不合条件的，另外 19 条照样执行。
+   */
+  bulkPosts: (scope: BulkScope, action: PostBulkAction) =>
+    request<BulkPostResponse>('POST', '/admin/posts/bulk', { ...scope, action }),
+
   projects: (query: { language?: string; sort?: ProjectSortKey } = {}) => {
     const q = new URLSearchParams()
     if (query.language && query.language !== 'all') q.set('language', query.language)
@@ -833,6 +923,10 @@ export const adminApi = {
 
   deleteProject: (id: number) =>
     request<{ deleted: true; id: number } & ProjectFacets>('DELETE', `/admin/projects/${id}`),
+
+  /** 批量改状态 / 改精选 / 删除。契约形状与文章、媒体库一致 */
+  bulkProjects: (scope: BulkScope, action: ProjectBulkAction) =>
+    request<BulkProjectResponse>('POST', '/admin/projects/bulk', { ...scope, action }),
 
   /**
    * 拖拽排序：提交**整份** id 顺序，下标即新顺序。
@@ -872,7 +966,17 @@ export const adminApi = {
 
   /**
    * 删除。被引用时服务端会 409 拦下；`force` 是管理员在看清引用清单之后的第二次确认。
+   * 来源是「随构建发布」的素材一律 409，**`force` 也绕不过去** —— 那道门拦的不是代价，
+   * 而是「这件事不成立」（文件会在下次构建时回来）。
    */
   deleteMedia: (id: number, force = false) =>
     request<MediaDeleteResponse>('DELETE', `/admin/media/${id}${force ? '?force=1' : ''}`),
+
+  /**
+   * 批量删除。被引用与随构建发布的条目会被服务端**跳过**（在 `skipped` 里逐条说明理由），
+   * 其余连同磁盘文件一起删掉。不走 `force`：一次删多张被引用的图，风险不是
+   * 「多按一次确认」能盖住的，要删就去详情面板一张一张删。
+   */
+  bulkDeleteMedia: (scope: BulkScope) =>
+    request<BulkMediaResponse>('POST', '/admin/media/bulk', { ...scope, action: 'delete' }),
 }

@@ -8,21 +8,31 @@
  * - 画布的行高是 `fill_container`（8 行把卡片撑满），但那一套会让行高随「本屏有几篇」
  *   浮动。这里改为固定 62px（与骨架行同高，加载前后不跳）。
  * - 缩略图用封面图；没有封面时退回一个暖灰方块加文档图标，不占位成破图。
+ *
+ * 多选批量（画布上没有）：选中范围**限于当前页**，见 `ui.tsx` 的 `usePageSelection`。
+ * 两个动作里「移入回收站」是幂等的，「彻底删除」只对回收站里开放 —— 准入与单条
+ * 完全同源，所以这里既不预先禁用任何一个动作，也不在弹层里复述逐条理由：
+ * 确认弹层只给**数量**（真正会动几篇、会跳过几篇），逐条理由由服务端在操作后回带。
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { adminDashboardCopy, adminPostsCopy as copy } from '../../data/admin'
 import {
   ApiError,
   adminApi,
+  type BulkSkipped,
   type CategoryItem,
+  type PostBulkAction,
   type PostCounts,
   type PostFilterStatus,
   type PostListItem,
   type PostSortKey,
+  type PostStatus,
 } from '../adminApi'
 import { ArrowRightIcon, DocIcon, PencilIcon, TrashIcon, UndoIcon } from '../AdminIcons'
 import {
+  Button,
+  Checkbox,
   Chip,
   ChipCount,
   ConfirmDialog,
@@ -33,8 +43,10 @@ import {
   Pager,
   PostStatusBadge,
   RowMenu,
+  SelectionBar,
   SkeletonRows,
   Toolbar,
+  useSelection,
   type RowAction,
 } from '../ui'
 
@@ -53,6 +65,15 @@ const SORTS: readonly { key: PostSortKey; label: string }[] = [
 
 const PER_PAGE = 8
 const VIEW_FORMAT = new Intl.NumberFormat('en-US')
+
+/** 批量动作按钮的图标。与行菜单里同名动作用的是同一个图标 —— 同名不同图会很别扭。 */
+const BULK_ICON: Record<PostBulkAction, (props: { className?: string }) => ReactNode> = {
+  publish: ArrowRightIcon,
+  unpublish: UndoIcon,
+  trash: TrashIcon,
+  restore: UndoIcon,
+  delete: TrashIcon,
+}
 
 interface ListState {
   items: PostListItem[]
@@ -84,6 +105,24 @@ export default function AdminPosts() {
   const [busyId, setBusyId] = useState<number | null>(null)
   const [pendingRemove, setPendingRemove] = useState<PostListItem | null>(null)
   const [notice, setNotice] = useState('')
+  /** 批量：待确认的动作 + 回执里那张「被跳过」清单（清单来自服务端，前端不自己编） */
+  const [bulk, setBulk] = useState<PostBulkAction | null>(null)
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const [bulkSkipped, setBulkSkipped] = useState<BulkSkipped[]>([])
+
+  /**
+   * 选中范围有两种，见 `useSelection`：`page` 是本页勾的那几条，
+   * `all` 是「符合当前筛选的全部 N 篇」（跨页）。
+   *
+   * `pageIds` 用 `data.items` 而不是分页后的切片 —— 文章列表的分页在服务端，
+   * 这一屏拿到的 8 条就是当前页，不存在「拿到全量再切」这一步。
+   *
+   * `filter` 的形状必须与服务端 `postScope()` 读的一致（status / category）：
+   * 全选送过去的就是这两个条件，服务端按同一个函数换算，所以「屏幕上显示几篇」
+   * 与「全选处理几篇」是不可能有出入的。
+   */
+  const pageIds = useMemo(() => data.items.map((p) => p.id), [data.items])
+  const sel = useSelection({ pageIds, total: data.total, filter: { status, category } })
 
   const load = useCallback(
     async (signal?: { cancelled: boolean }) => {
@@ -157,6 +196,100 @@ export default function AdminPosts() {
     }
   }
 
+  /* ------------------------------------------------------------- 批量 */
+
+  /*
+   * 某个动作对某篇文章**是否成立**。
+   *
+   * 这份判定与服务端 `posts/bulk` 里逐条跳过用的条件是一对一的抽象，
+   * 但它的用途是**决定按钮要不要出现**，不是替服务端做决定 —— 真正执行时
+   * 服务端还会自己再判一遍（翻开 `readBulkPayload` 后面的那段循环就能看到）。
+   * 前端这份只说「至少有一篇可能动得了才把按钮摆出来」。
+   */
+  const applies = (s: PostStatus, action: PostBulkAction) =>
+    action === 'publish'
+      ? s === 'draft'
+      : action === 'unpublish'
+        ? s === 'published'
+        : action === 'trash'
+          ? s !== 'trash'
+          : action === 'restore'
+            ? s === 'trash'
+            : s === 'trash'
+
+  /*
+   * 这批选中里**存在哪些状态**。
+   *
+   * `all` 模式下知道了「筛选的是哪个页签」，整批的状态其实是确定的 ——
+   * 回收站页签下全是 trash，所以 restore 与 delete 是精确的；只有「全部」页签
+   * 下才需要靠本页这 8 条去推。推得不全不会造成错处：不符合的会被服务端跳过，
+   * 但可能会少给一两个按钮。与其为了「一个都不漏」把五个动作常年摆满、让每次
+   * 选择都像在一排无关按钮里找，不如承认这个限制。
+   */
+  const poolStatuses: PostStatus[] = sel.mode === 'all'
+    ? status !== 'all'
+      ? [status]
+      : data.items.map((p) => p.status)
+    : data.items.filter((p) => sel.has(p.id)).map((p) => p.status)
+
+  /** 界面上按「至少有一条用得上」来决定给不给这个按钮 */
+  const bulkActions = useMemo(() => {
+    const order: PostBulkAction[] = ['publish', 'unpublish', 'trash', 'restore', 'delete']
+    return order.filter((action) => poolStatuses.some((s) => applies(s, action)))
+  }, [poolStatuses.join(',')])
+
+  /** 本页显式勾中的那几篇（只有 page 模式需要它，`all` 模式的账由服务端算） */
+  const bulkSelected = useMemo(() => data.items.filter((p) => sel.has(p.id)), [data.items, sel.mode, sel.count])
+
+  /*
+   * 预告「会动几篇」。只有本页模式（以及 all 模式恰好筛选了某个页签）才数得准，
+   * 数不准时是 `null` —— 弹层那时**不给数量**，而不是给一个看着精确其实不准的数。
+   * 执行完会怎样，一律以服务端回的 `affected` / `skipped` 为准。
+   */
+  const readyCount = bulk
+    ? sel.mode === 'all'
+      ? status !== 'all'
+        ? sel.count
+        : null
+      : bulkSelected.filter((p) => applies(p.status, bulk)).length
+    : 0
+  const bulkHeld = bulk && readyCount !== null ? Math.max(sel.count - readyCount, 0) : 0
+
+  const runBulk = async () => {
+    if (!bulk) return
+    setBulkBusy(true)
+    setNotice('')
+    setBulkSkipped([])
+    try {
+      const res = await adminApi.bulkPosts(sel.scope(), bulk)
+      setNotice(
+        res.affected
+          ? (res.skipped.length ? copy.bulk.doneWithSkips : copy.bulk.done)
+              .replace('{done}', String(res.affected))
+              .replace('{skipped}', String(res.skipped.length))
+          : copy.bulk.none
+      )
+      setBulkSkipped(res.skipped)
+      setBulk(null)
+      sel.clear()
+      await load()
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setNotice(err.message)
+        /*
+         * 409 是「服务端算出的集合与界面上兜 count 的那批对不上」。这通常意味着
+         * 列表已经变了，所以除了要把话说清楚，还要**立刻重取** ——
+         * 否则界面会停在一个过时的名单上，让人对着旧数字再来一次。
+         */
+        if (err.status === 409) await load()
+      } else {
+        setNotice(copy.bulk.failed)
+      }
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
   const { counts } = data
   const summary = copy.summary
     .replace('{published}', String(counts.published))
@@ -216,10 +349,92 @@ export default function AdminPosts() {
           {notice}
         </Notice>
       ) : null}
+      {/*
+        被跳过的条目逐条摆出来。理由全部来自服务端回的 `skipped` —— 前端不复述
+        「为什么跳过」的规则，因为那是判定的一部分，抄一份就多一个会说岔的地方。
+      */}
+      {bulkSkipped.length ? (
+        <Notice tone="warn" onClose={() => setBulkSkipped([])}>
+          <span className="flex flex-col gap-[5px]">
+            <span>{copy.bulk.skipped.replace('{n}', String(bulkSkipped.length))}</span>
+            {bulkSkipped.map((s) => (
+              <span key={s.id} className="text-[11.5px]">
+                · {s.label}
+                <span className="opacity-75"> · {s.reason}</span>
+              </span>
+            ))}
+          </span>
+        </Notice>
+      ) : null}
+
+      {/* 批量操作条：选中项非空才出现，位置在筛选条与列表之间 —— 筛选条要继续可见，
+          否则你不知道自己是在哪个筛选下选的这几篇 */}
+      {sel.count > 0 ? (
+        <SelectionBar
+          count={sel.count}
+          label={copy.bulk.selected}
+          clearLabel={copy.bulk.clear}
+          onClear={sel.clear}
+          /* 「含其他页」这句话只在跨页全选时出现：条数是唯一的凭据，
+             而它指的东西在这两种范围下完全不同，必须说清 */
+          hint={sel.mode === 'all' ? copy.bulk.allScopeHint : undefined}
+          lead={
+            sel.mode === 'page' && data.total > data.items.length ? (
+              <button
+                type="button"
+                onClick={sel.selectAllFiltered}
+                className="font-cn text-[12px] leading-none text-[var(--color-primary)] underline-offset-2 hover:underline"
+              >
+                {copy.bulk.selectAllFiltered.replace('{n}', String(data.total))}
+              </button>
+            ) : sel.mode === 'all' ? (
+              <button
+                type="button"
+                onClick={sel.clear}
+                className="font-cn text-[12px] leading-none text-[var(--color-primary)] underline-offset-2 hover:underline"
+              >
+                {copy.bulk.exitAllScope}
+              </button>
+            ) : undefined
+          }
+          actions={
+            <>
+              {bulkActions.map((action) => {
+                /* 图标跟着动作走，而不是全用垃圾桶：一排按钮靠形状区分位置时，
+                   五个一模一样的图标会把「哪一个删得干净」这个问题变得难以回答。
+                   组件要先取出来再用 —— JSX 标签名不接受带方括号的成员表达式。 */
+                const Icon = BULK_ICON[action]
+                return (
+                  <Button
+                    key={action}
+                    variant={action === 'delete' ? 'danger' : 'outline'}
+                    size="sm"
+                    icon={<Icon className="h-[13px] w-[13px]" />}
+                    onClick={() => setBulk(action)}
+                  >
+                    {copy.bulk.actions[action].label}
+                  </Button>
+                )
+              })}
+            </>
+          }
+        />
+      ) : null}
 
       {/* ------------------------------------------------------------ 列表卡片 */}
       <section className="flex min-h-[320px] flex-1 flex-col rounded-[16px] border border-[var(--color-line)] bg-[var(--admin-surface)]">
         <div className="flex items-center gap-[14px] px-[20px] pb-[12px] pt-[14px]">
+          {/* 表头这颗是全选（当前页）。行与表头两边的列宽必须逐列对齐，所以它是
+              一条独立的 16px 列，不是叠在缩略图那一列上 */}
+          <span className="w-[16px] shrink-0">
+            <Checkbox
+              checked={sel.allSelected}
+              indeterminate={sel.partial}
+              disabled={data.items.length === 0}
+              onChange={() => sel.toggleAll()}
+              label={copy.bulk.selectAll}
+            />
+          </span>
           <span className="w-[40px] shrink-0" aria-hidden="true" />
           <span className="flex-1 font-cn text-[12px] font-medium text-[var(--color-ink-3)]">
             {copy.columns.title}
@@ -249,6 +464,8 @@ export default function AdminPosts() {
                 first={i === 0}
                 post={post}
                 busy={busyId === post.id}
+                selected={sel.has(post.id)}
+                onToggle={(on) => sel.toggle(post.id, on)}
                 onEdit={() => nav(`/admin/posts/${post.id}`)}
                 onPublish={() => void setStatusOf(post, 'published')}
                 onUnpublish={() => void setStatusOf(post, 'draft')}
@@ -295,6 +512,40 @@ export default function AdminPosts() {
           if (post) void remove(post)
         }}
       />
+
+      {/*
+        批量确认。
+        标题里的数量是**真正会动的条数**，连同动作一起从 `bulk` 那个 key 取 ——
+        五个动作共用这一个弹层，各自的标题、说明、跳过理由都在文案里成套放着，
+        加一个新动作不必动这里的结构。
+        一个都动不了时按钮是灰的：与其让人点下去收到一条「没有任何改动」，
+        不如在能看清原因的地方就停住。
+      */}
+      <ConfirmDialog
+        open={bulk !== null}
+        tone={bulk === 'delete' ? 'danger' : 'default'}
+        busy={bulkBusy}
+        title={bulk ? copy.bulk.actions[bulk].title.replace('{n}', String(readyCount ?? sel.count)) : ''}
+        confirmLabel={bulk ? copy.bulk.actions[bulk].label : ''}
+        confirmDisabled={readyCount === 0}
+        message={
+          bulk ? (
+            <span className="flex flex-col gap-[8px]">
+              <span>{copy.bulk.actions[bulk].message}</span>
+              {/* 数量数得准才给这句；数不准时不编一个精确的数字，让服务端事后结账 */}
+              {bulkHeld > 0 ? (
+                <span className="text-[var(--color-ink-3)]">
+                  {copy.bulk.skipNote
+                    .replace('{hint}', copy.bulk.actions[bulk].skipHint)
+                    .replace('{n}', String(bulkHeld))}
+                </span>
+              ) : null}
+            </span>
+          ) : null
+        }
+        onConfirm={() => void runBulk()}
+        onCancel={() => setBulk(null)}
+      />
     </div>
   )
 }
@@ -317,6 +568,8 @@ function PostRow({
   post,
   first,
   busy,
+  selected,
+  onToggle,
   onEdit,
   onPublish,
   onUnpublish,
@@ -327,6 +580,8 @@ function PostRow({
   post: PostListItem
   first: boolean
   busy: boolean
+  selected: boolean
+  onToggle: (on: boolean) => void
   onEdit: () => void
   onPublish: () => void
   onUnpublish: () => void
@@ -357,11 +612,20 @@ function PostRow({
   return (
     <div
       className={[
-        'flex h-[62px] shrink-0 items-center gap-[14px] px-[20px] transition-colors hover:bg-[var(--color-bg-soft)]',
+        'flex h-[62px] shrink-0 items-center gap-[14px] px-[20px] transition-colors',
+        selected ? 'bg-[var(--color-primary-soft)]' : 'hover:bg-[var(--color-bg-soft)]',
         first ? '' : 'border-t border-[var(--color-line-soft)]',
         busy ? 'pointer-events-none opacity-60' : '',
       ].join(' ')}
     >
+      <span className="flex w-[16px] shrink-0 justify-center">
+        <Checkbox
+          checked={selected}
+          onChange={onToggle}
+          label={copy.bulk.selectRow.replace('{title}', post.title || copy.untitled)}
+        />
+      </span>
+
       <span className="flex h-[40px] w-[40px] shrink-0 items-center justify-center overflow-hidden rounded-[10px] bg-[#f6f1eb]">
         {post.coverImage ? (
           <img src={post.coverImage} alt="" className="h-full w-full object-cover" loading="lazy" />

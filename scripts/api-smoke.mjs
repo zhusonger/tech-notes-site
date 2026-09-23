@@ -1313,19 +1313,43 @@ async function main() {
   const mediaNotFound = await call('PATCH', '/api/admin/media/999999', { alt: 'x' })
   assert('改不存在的媒体返回 404', mediaNotFound.status === 404, mediaNotFound.json?.error ?? '')
 
-  const referenced = mediaSeed.find((m) => m.filename === 'portrait.png')
-  const delBlocked = await call('DELETE', `/api/admin/media/${referenced?.id}`)
+  /*
+   * 删除的两道门，性质不同，所以禁得起不同的绕法：
+   *   - **来源门**：随构建发布的素材（种子里的图就是）本体在版本库里，运行期删掉会在
+   *     下次构建时被拷回来 —— 它不属于「代价大」，而属于「这件事不成立」，`force` 也绕不过。
+   *   - **引用门**：被引用的默认拒删并带回清单，`force=1` 才放行。
+   *
+   * 种子图恰好既被引用又属于第一类，所以它同时充当「先报来源、再报引用」这个顺序的样本。
+   */
+  const seedBuild = mediaSeed.find((m) => m.filename === 'portrait.png')
+  const delBuild = await call('DELETE', `/api/admin/media/${seedBuild?.id}`)
   assert(
-    '被引用时默认拒删，并把引用清单原样带回',
-    delBlocked.status === 409 &&
-      (delBlocked.json?.references ?? []).length > 0 &&
-      delBlocked.json?.references?.[0]?.href,
-    `${delBlocked.json?.error} → ${(delBlocked.json?.references ?? []).map((r) => r.label).join('、')}`
+    '随构建发布的素材不可删：409，理由是来源而不是「被引用」',
+    delBuild.status === 409 && (delBuild.json?.error ?? '').includes('随构建产物发布'),
+    delBuild.json?.error ?? ''
+  )
+  assert(
+    '不可删的条目仍把引用清单带回来（界面要能说清它被谁用着）',
+    (delBuild.json?.references ?? []).length > 0 && Boolean(delBuild.json?.references?.[0]?.href),
+    (delBuild.json?.references ?? []).map((r) => r.label).join('、') || '(空)'
+  )
+  const delBuildForced = await call('DELETE', `/api/admin/media/${seedBuild?.id}?force=1`)
+  assert(
+    'force 也绕不过来源门（它拦的不是代价，而是「这件事不成立」）',
+    delBuildForced.status === 409 && delBuildForced.json?.deleted !== true,
+    `HTTP ${delBuildForced.status}`
   )
   const stillThere = await call('GET', '/api/admin/media')
   assert(
     '被拦下的删除没有产生任何副作用（行还在、盘上文件还在）',
     (stillThere.json?.items ?? []).some((m) => m.filename === 'portrait.png' && m.missing === false)
+  )
+  assert(
+    '列表里每一项都带来源，且来源策略随列表一起下发（界面上的禁用与拒收读的是同一份）',
+    mediaSeed.every((m) => m.origin === 'build') &&
+      mediaList.json?.policy?.origins?.build?.removable === false &&
+      mediaList.json?.policy?.origins?.upload?.removable === true,
+    `origins=${JSON.stringify(mediaList.json?.policy?.origins ?? {})}`
   )
 
   const delPng = await call('DELETE', `/api/admin/media/${upId}`)
@@ -1665,6 +1689,391 @@ async function main() {
   assert(
     '审计的目标类型是 category / tag，不是 post',
     taxRows.every((l) => l.targetType === 'category' || l.targetType === 'tag')
+  )
+
+  /*
+   * 15g. 批量操作（文章 / 项目 / 媒体库）。
+   *
+   * 三屏共用一套契约 `{ ids, action }`，所以这里也按同一套形状验：
+   *   1. **逐条判定，不全有或全无。** 一批里混着符合条件的与不符合条件的，
+   *      该动的动、不该动的进 `skipped` 并带理由 —— 全有或全无会让一条不合规把
+   *      一整批都卡住；
+   *   2. **准入与单条同源。** 文章批量彻底删除只对回收站开放、批量移入回收站幂等、
+   *      媒体批量沿用来源与引用两道门（且**不提供 force**）；
+   *   3. **回执是逐条的账**：`affected` 是真的动了的条数，`skipped` 里每条都带理由，
+   *      日志页另有独立动作码（`post_bulk` / `project_bulk` / `media_bulk`）。
+   *
+   * 全程用自己新建的文章 / 项目 / 上传文件做实验，结尾一律清干净。
+   */
+
+  /* ---- 文章 */
+  const bulkP1 = await call('POST', '/api/admin/posts', {
+    title: `冒烟·批量甲 ${stamp}`,
+    body: '批量操作占位正文。',
+  })
+  const bulkP2 = await call('POST', '/api/admin/posts', { title: `冒烟·批量乙 ${stamp}` })
+  const bulkP1Id = bulkP1.json?.post?.id
+  const bulkP2Id = bulkP2.json?.post?.id
+
+  /* 一篇先移进回收站，另一篇留在草稿 —— 批量彻底删除应当只动前者 */
+  await call('PATCH', `/api/admin/posts/${bulkP2Id}`, { status: 'trash' })
+  const postBulkDel = await call('POST', '/api/admin/posts/bulk', {
+    action: 'delete',
+    ids: [bulkP1Id, bulkP2Id, 999999],
+  })
+  assert(
+    '批量彻底删除只对回收站里的开放：不在回收站的与不存在的一律跳过（逐条判定，不全有或全无）',
+    postBulkDel.status === 200 &&
+      postBulkDel.json?.affected === 1 &&
+      (postBulkDel.json?.skipped ?? []).length === 2 &&
+      (postBulkDel.json?.skipped ?? []).some((s) => (s.reason ?? '').includes('不在回收站')),
+    `affected=${postBulkDel.json?.affected} · ${(postBulkDel.json?.skipped ?? []).map((s) => `${s.label}：${s.reason}`).join(' / ')}`
+  )
+  assert(
+    '批量操作把最新的状态计数一起带回来（列表页的页签计数不必再取一遍）',
+    typeof postBulkDel.json?.counts?.published === 'number' &&
+      typeof postBulkDel.json?.counts?.trash === 'number',
+    JSON.stringify(postBulkDel.json?.counts ?? {})
+  )
+
+  const postBulkTrash = await call('POST', '/api/admin/posts/bulk', { action: 'trash', ids: [bulkP1Id] })
+  assert(
+    '批量移入回收站成功',
+    postBulkTrash.status === 200 && postBulkTrash.json?.affected === 1,
+    `affected=${postBulkTrash.json?.affected}`
+  )
+  const postBulkTrashAgain = await call('POST', '/api/admin/posts/bulk', { action: 'trash', ids: [bulkP1Id] })
+  assert(
+    '批量移入回收站是幂等的：已在回收站的算跳过，而不是「又处理了一篇」',
+    postBulkTrashAgain.status === 200 &&
+      postBulkTrashAgain.json?.affected === 0 &&
+      (postBulkTrashAgain.json?.skipped ?? []).some((s) => (s.reason ?? '').includes('已在回收站')),
+    postBulkTrashAgain.json?.skipped?.[0]?.reason ?? '(无)'
+  )
+  const postBulkDup = await call('POST', '/api/admin/posts/bulk', {
+    action: 'trash',
+    ids: [bulkP1Id, bulkP1Id],
+  })
+  assert(
+    '重复 id 去重后只处理一次（这是「选了这些」而不是「按这个顺序处理」）',
+    postBulkDup.json?.skipped?.length === 1,
+    `skipped=${postBulkDup.json?.skipped?.length}`
+  )
+
+  /* ---- 新加的四个状态流转动作：与单条 PATCH 同源 —— 已是目标状态的算跳过 */
+  const postBulkRestore = await call('POST', '/api/admin/posts/bulk', { action: 'restore', ids: [bulkP1Id] })
+  const afterRestore = await call('GET', `/api/admin/posts/${bulkP1Id}`)
+  assert(
+    '批量「移出回收站」把它们转回草稿（与单条 PATCH 的 restore 是同一个目标状态）',
+    postBulkRestore.status === 200 &&
+      postBulkRestore.json?.affected === 1 &&
+      afterRestore.json?.post?.status === 'draft',
+    `affected=${postBulkRestore.json?.affected} · status=${afterRestore.json?.post?.status}`
+  )
+  const postBulkRestoreAgain = await call('POST', '/api/admin/posts/bulk', { action: 'restore', ids: [bulkP1Id] })
+  assert(
+    '批量「移出回收站」幂等：不在回收站的算跳过，而不是「又处理了一篇」',
+    postBulkRestoreAgain.json?.affected === 0 &&
+      (postBulkRestoreAgain.json?.skipped ?? []).some((s) => (s.reason ?? '').includes('不在回收站')),
+    postBulkRestoreAgain.json?.skipped?.[0]?.reason ?? '(无)'
+  )
+
+  const postBulkPublish = await call('POST', '/api/admin/posts/bulk', { action: 'publish', ids: [bulkP1Id] })
+  const afterPublish = await call('GET', `/api/admin/posts/${bulkP1Id}`)
+  assert(
+    '批量「发布」把草稿转已发布，并记下发布时间（口径与单条一致：首次发布才落 published_at）',
+    postBulkPublish.json?.affected === 1 &&
+      afterPublish.json?.post?.status === 'published' &&
+      Boolean(afterPublish.json?.post?.publishedAt),
+    `status=${afterPublish.json?.post?.status} · publishedAt=${afterPublish.json?.post?.publishedAt ?? '(空)'}`
+  )
+  const postBulkPublishAgain = await call('POST', '/api/admin/posts/bulk', { action: 'publish', ids: [bulkP1Id] })
+  assert(
+    '批量「发布」幂等：已是已发布的算跳过',
+    postBulkPublishAgain.json?.affected === 0 &&
+      (postBulkPublishAgain.json?.skipped ?? []).some((s) => (s.reason ?? '').includes('已经是已发布')),
+    postBulkPublishAgain.json?.skipped?.[0]?.reason ?? '(无)'
+  )
+  const postBulkUnpublish = await call('POST', '/api/admin/posts/bulk', { action: 'unpublish', ids: [bulkP1Id] })
+  const afterUnpublish = await call('GET', `/api/admin/posts/${bulkP1Id}`)
+  assert(
+    '批量「转为草稿」不清空发布时间（再次发布时「发布于」不该被抹成今天）',
+    postBulkUnpublish.json?.affected === 1 &&
+      afterUnpublish.json?.post?.status === 'draft' &&
+      afterUnpublish.json?.post?.publishedAt === afterPublish.json?.post?.publishedAt,
+    `publishedAt=${afterUnpublish.json?.post?.publishedAt ?? '(空)'} vs ${afterPublish.json?.post?.publishedAt ?? '(空)'}`
+  )
+  const postBulkUnpublishAgain = await call('POST', '/api/admin/posts/bulk', { action: 'unpublish', ids: [bulkP1Id] })
+  assert(
+    '批量「转为草稿」幂等：已经是草稿的算跳过',
+    postBulkUnpublishAgain.json?.affected === 0 &&
+      (postBulkUnpublishAgain.json?.skipped ?? []).some((s) => (s.reason ?? '').includes('已经是草稿')),
+    postBulkUnpublishAgain.json?.skipped?.[0]?.reason ?? '(无)'
+  )
+
+  /* ---- 「按当前筛选全选」：传意图，不传副本 */
+  /*
+   * 这一段验的是 filter 模式那条路与它自己的两条护栏。
+   * 用它而不是「把所有 id 拉下来传回去」，是因为后者在几百条时会被 BULK_MAX 拦下，
+   * 而且拉与传之间若有别处写入，那份 id 已经过期。
+   */
+  const filterBoth = await call('POST', '/api/admin/posts/bulk', {
+    action: 'trash',
+    ids: [bulkP1Id],
+    filter: { status: 'draft', category: 'all' },
+  })
+  assert(
+    'ids 与 filter 只能给一个（两者都说得通，于是这个歧义不允许存在）',
+    filterBoth.status === 400 && /只能给一个/.test(filterBoth.json?.error ?? ''),
+    `HTTP ${filterBoth.status} · ${filterBoth.json?.error ?? ''}`
+  )
+
+  /*
+   * 先造一批只属于这次测试的草稿，用它们验「按筛选全选」。
+   *
+   * 分类必须先建：文章上的 `category` 只允许填**已存在**的分类（否则一次笔误就会
+   * 在 `posts.category` 里留下一个前台筛选条上找不到的孤儿分类）。所以这里先建一个
+   * 一次性分类，再把它当筛选条件 —— 好处是这批草稿不会碰到种子的任何一篇。
+   */
+  const bulkCat = `冒烟分类 ${stamp}`
+  await call('POST', '/api/admin/categories', { name: bulkCat })
+  const bulkCatA = await call('POST', '/api/admin/posts', { title: `冒烟·全选甲 ${stamp}`, category: bulkCat })
+  const bulkCatB = await call('POST', '/api/admin/posts', { title: `冒烟·全选乙 ${stamp}`, category: bulkCat })
+  const beforeFilter = await call('GET', `/api/admin/posts?status=draft&category=${encodeURIComponent(bulkCat)}`)
+  const filterTotal = beforeFilter.json?.total ?? 0
+  assert(
+    '这批只属于本次测试的文章建出来了（否则下面几条验的都是空集，绿了也是假的）',
+    bulkCatA.status === 201 && bulkCatB.status === 201 && filterTotal === 2,
+    `A=${bulkCatA.status} B=${bulkCatB.status} · 筛出 ${filterTotal} 篇${bulkCatA.json?.error ? ` · ${bulkCatA.json.error}` : ''}`
+  )
+
+  const filterStale = await call('POST', '/api/admin/posts/bulk', {
+    action: 'trash',
+    filter: { status: 'draft', category: bulkCat },
+    expected: filterTotal + 50,
+  })
+  assert(
+    '按筛选全选带的数量快照对不上就 409，不许照着旧名单动手（列表变了要让人重新确认）',
+    filterStale.status === 409 &&
+      filterStale.json?.expected === filterTotal + 50 &&
+      filterStale.json?.actual === filterTotal,
+    `HTTP ${filterStale.status} · expected=${filterStale.json?.expected} actual=${filterStale.json?.actual}`
+  )
+
+  const filterHit = await call('POST', '/api/admin/posts/bulk', {
+    action: 'trash',
+    filter: { status: 'draft', category: bulkCat },
+    expected: filterTotal,
+  })
+  assert(
+    '按筛选全选：命中集合与列表接口是同一个（屏幕上有几篇就动几篇，不靠前端回传 id）',
+    filterHit.status === 200 && filterHit.json?.affected === filterTotal && filterHit.json?.scope === 'filter',
+    `affected=${filterHit.json?.affected} / 筛选下共 ${filterTotal}`
+  )
+
+  /* 上一步之后它们已经在回收站里，所以这一轮按 trash 筛才能再次命中 ——
+     按 draft 筛只会命中空集，那是另一个「400」而不是「全部跳过」 */
+  const filterSkip = await call('POST', '/api/admin/posts/bulk', {
+    action: 'trash',
+    filter: { status: 'trash', category: bulkCat },
+  })
+  assert(
+    '按筛选全选只扩大候选集，不降低准入标准：这批已经在回收站，再次执行全部跳过',
+    filterSkip.status === 200 &&
+      filterSkip.json?.affected === 0 &&
+      (filterSkip.json?.skipped ?? []).length === filterTotal,
+    `affected=${filterSkip.json?.affected} skipped=${(filterSkip.json?.skipped ?? []).length}`
+  )
+
+  /*
+   * exclude 表达「全部，除了这几条」——「全选之后反选」只有这一种说法。
+   * 判据不是「少删了一条」这种间接证据，而是**被扣掉的那条还在**：
+   * 它不在 skipped 里（那不是跳过，是根本没选），它应当原样活着。
+   */
+  const filterExclude = await call('POST', '/api/admin/posts/bulk', {
+    action: 'delete',
+    filter: { status: 'trash', category: bulkCat },
+    exclude: [bulkCatA.json?.post?.id],
+  })
+  const excludedStill = await call('GET', `/api/admin/posts/${bulkCatA.json?.post?.id}`)
+  assert(
+    'exclude 能从全选里扣掉几条：被扣掉的那条原样还在，没进跳过清单（那不是跳过，是没选）',
+    filterExclude.status === 200 &&
+      filterExclude.json?.affected === filterTotal - 1 &&
+      excludedStill.status === 200,
+    `affected=${filterExclude.json?.affected}（应少一条）· 被扣那条 HTTP ${excludedStill.status}`
+  )
+
+  /* 清场：两条都是这次造的，一并删干净（在回收站里，可直接彻底删除） */
+  for (const id of [bulkCatA.json?.post?.id, bulkCatB.json?.post?.id]) {
+    await call('PATCH', `/api/admin/posts/${id}`, { status: 'trash' })
+    await call('DELETE', `/api/admin/posts/${id}`)
+  }
+
+  /* ---- 项目 */
+  const projListBefore = await call('GET', '/api/admin/projects')
+  const projectTotalBefore = projListBefore.json?.counts?.all ?? 0
+
+  const bulkProjA = await call('POST', '/api/admin/projects', { title: `冒烟·批量项目甲 ${stamp}` })
+  const bulkProjB = await call('POST', '/api/admin/projects', { title: `冒烟·批量项目乙 ${stamp}` })
+  const projAId = bulkProjA.json?.project?.id
+  const projBId = bulkProjB.json?.project?.id
+
+  /*
+   * 项目新增的两个开关方向（发布 / 精选）。两者都是「翻转一个布尔」，
+   * 所以判据不是 affected 的绝对数量，而是**目标字段真的变了**，
+   * 以及**已经是目标值的不再算一次**（与单条 PATCH 的「没变就不记」同一口径）。
+   */
+  const projFeature = await call('POST', '/api/admin/projects/bulk', { action: 'feature', ids: [projAId, projBId] })
+  const projAFterFeature = await call('GET', '/api/admin/projects')
+  const featuredNow = (projAFterFeature.json?.items ?? []).filter(
+    (p) => (p.id === projAId || p.id === projBId) && p.featured === true
+  )
+  assert(
+    '批量「设为精选」真的翻转了字段（不是回执说 2 就算数）',
+    projFeature.json?.affected === 2 && featuredNow.length === 2,
+    `affected=${projFeature.json?.affected} · 实际精选=${featuredNow.length}`
+  )
+  const projFeatureAgain = await call('POST', '/api/admin/projects/bulk', { action: 'feature', ids: [projAId] })
+  assert(
+    '批量「设为精选」幂等：已经是精选的算跳过',
+    projFeatureAgain.json?.affected === 0 &&
+      (projFeatureAgain.json?.skipped ?? []).some((s) => (s.reason ?? '').includes('已经是精选')),
+    projFeatureAgain.json?.skipped?.[0]?.reason ?? '(无)'
+  )
+  const projUnfeature = await call('POST', '/api/admin/projects/bulk', { action: 'unfeature', ids: [projAId] })
+  assert(
+    '批量「取消精选」生效，且不对没精选的重复操作',
+    projUnfeature.json?.affected === 1 &&
+      (projUnfeature.json?.skipped ?? []).length === 0,
+    `affected=${projUnfeature.json?.affected}`
+  )
+  const projPublish = await call('POST', '/api/admin/projects/bulk', { action: 'publish', ids: [projAId, projBId] })
+  assert(
+    '批量「发布」项目：新建即 published 的两条被跳过（幂等）',
+    projPublish.json?.affected === 0 && (projPublish.json?.skipped ?? []).length === 2,
+    `affected=${projPublish.json?.affected} skipped=${(projPublish.json?.skipped ?? []).map((s) => s.reason).join(' / ')}`
+  )
+  const projUnpublish = await call('POST', '/api/admin/projects/bulk', { action: 'unpublish', ids: [projAId, projBId] })
+  const projDraftCheck = await call('GET', '/api/admin/projects')
+  const draftsNow = (projDraftCheck.json?.items ?? []).filter(
+    (p) => (p.id === projAId || p.id === projBId) && p.status === 'draft'
+  )
+  assert(
+    '批量「转为草稿」真的翻转了状态字段',
+    projUnpublish.json?.affected === 2 && draftsNow.length === 2,
+    `affected=${projUnpublish.json?.affected} · 实际草稿=${draftsNow.length}`
+  )
+
+  const projBulk = await call('POST', '/api/admin/projects/bulk', {
+    action: 'delete',
+    ids: [projAId, projBId, 999999],
+  })
+  assert(
+    '批量删除项目：存在的都删掉，不存在的进跳过清单（同一套 { ids, action } 契约）',
+    projBulk.status === 200 &&
+      projBulk.json?.affected === 2 &&
+      (projBulk.json?.skipped ?? []).length === 1,
+    `affected=${projBulk.json?.affected} skipped=${(projBulk.json?.skipped ?? []).map((s) => s.reason).join(' / ')}`
+  )
+  assert(
+    '项目批量删除后计数与语言筛选条一并刷新（返回的是算好的 facets，不是让前端自己减法）',
+    projBulk.json?.counts?.all === projectTotalBefore && Array.isArray(projBulk.json?.languages),
+    `all=${projBulk.json?.counts?.all}（新建两个又删掉，应回到 ${projectTotalBefore}）· languages=${projBulk.json?.languages?.length}`
+  )
+
+  /* ---- 媒体库：能删的连文件一起删，不能删的按「来源 / 引用」跳过 */
+  const bulkUpA = await uploadRaw('../public/images/portrait.png', 'image/png', '批量甲.png')
+  const bulkUpB = await uploadRaw('../public/images/portrait.png', 'image/png', '批量乙.png')
+  const bulkUpC = await uploadRaw('../public/images/portrait.png', 'image/png', '批量丙.png')
+  const bulkUpAUrl = bulkUpA.json?.item?.url
+
+  /* 让「丙」被一篇文章引用 —— 引用关系没有表记得住，是删除前现扫出来的 */
+  const coverPost = await call('POST', '/api/admin/posts', {
+    title: `冒烟·媒体引用 ${stamp}`,
+    coverImage: bulkUpC.json?.item?.url,
+  })
+  const coverPostId = coverPost.json?.post?.id
+
+  const mediaBulk = await call('POST', '/api/admin/media/bulk', {
+    action: 'delete',
+    ids: [bulkUpA.json?.item?.id, bulkUpB.json?.item?.id, bulkUpC.json?.item?.id, seedBuild?.id, 999999],
+  })
+  assert(
+    '批量删除媒体逐条判定：能删的两项删掉并连带磁盘文件，被引用的 / 随构建发布的 / 不存在的一律跳过',
+    mediaBulk.status === 200 &&
+      mediaBulk.json?.affected === 2 &&
+      mediaBulk.json?.fileRemoved === 2 &&
+      (mediaBulk.json?.skipped ?? []).length === 3,
+    `affected=${mediaBulk.json?.affected} fileRemoved=${mediaBulk.json?.fileRemoved} · ${(mediaBulk.json?.skipped ?? []).map((s) => s.reason).join(' / ')}`
+  )
+  assert(
+    '跳过清单逐条带理由，且与单条删除说的是同一套话（来源 / 引用 / 不存在）',
+    ['随构建产物发布', '处引用', '不存在'].every((kw) =>
+      (mediaBulk.json?.skipped ?? []).some((s) => (s.reason ?? '').includes(kw))
+    ),
+    (mediaBulk.json?.skipped ?? []).map((s) => `${s.label}：${s.reason}`).join(' · ') || '(空)'
+  )
+  const bulkGone = await fetch(`${BASE}${bulkUpAUrl}`)
+  assert(
+    '批量删除真的删掉了磁盘文件（以 HTTP 能不能取到为准，不只看回执里那个字段）',
+    bulkGone.status === 404,
+    `GET ${bulkUpAUrl} → HTTP ${bulkGone.status}`
+  )
+  const mediaBulkForced = await call('POST', '/api/admin/media/bulk?force=1', {
+    action: 'delete',
+    ids: [bulkUpC.json?.item?.id],
+  })
+  assert(
+    '批量不提供 force：被引用的文件仍然跳过（要强删只能回详情面板逐张确认）',
+    mediaBulkForced.status === 200 &&
+      mediaBulkForced.json?.affected === 0 &&
+      (mediaBulkForced.json?.skipped ?? []).length === 1,
+    `affected=${mediaBulkForced.json?.affected}`
+  )
+
+  /* ---- 载荷校验与清场 */
+  const bulkNoIds = await call('POST', '/api/admin/posts/bulk', { action: 'trash', ids: [] })
+  assert('批量操作没有选中任何条目返回 400', bulkNoIds.status === 400, bulkNoIds.json?.error ?? '')
+  const bulkBadAction = await call('POST', '/api/admin/posts/bulk', { action: 'archive', ids: [bulkP1Id] })
+  assert(
+    '批量动作不在闭集里返回 400（「顺手加一个动作」没有口子）',
+    bulkBadAction.status === 400,
+    bulkBadAction.json?.error ?? ''
+  )
+  const bulkTooMany = await call('POST', '/api/admin/posts/bulk', {
+    action: 'trash',
+    ids: Array.from({ length: 201 }, (_, i) => i + 1),
+  })
+  assert('一次批量最多 200 项（不把后台的一个按钮做成放大器）', bulkTooMany.status === 400, bulkTooMany.json?.error ?? '')
+
+  for (const id of [bulkP1Id]) {
+    await call('PATCH', `/api/admin/posts/${id}`, { status: 'trash' })
+    await call('DELETE', `/api/admin/posts/${id}`)
+  }
+  await call('PATCH', `/api/admin/posts/${coverPostId}`, { status: 'trash' })
+  const coverClean = await call('DELETE', `/api/admin/posts/${coverPostId}`)
+  const mediaBulkClean = await call('POST', '/api/admin/media/bulk', {
+    action: 'delete',
+    ids: [bulkUpC.json?.item?.id],
+  })
+  assert(
+    '清场：引用解除后同一张图可以批量删掉，媒体库回到种子的项数',
+    coverClean.status === 200 && mediaBulkClean.json?.affected === 1 && mediaBulkClean.json?.counts?.all === mediaSeed.length,
+    `affected=${mediaBulkClean.json?.affected} all=${mediaBulkClean.json?.counts?.all}`
+  )
+
+  const bulkAudits = await call('GET', '/api/admin/audit-logs?range=0&perPage=200')
+  const bulkRows = (bulkAudits.json?.items ?? []).filter((l) => /_bulk$/.test(l.action ?? ''))
+  assert(
+    '三类批量动作各有自己的动作码（post_bulk / project_bulk / media_bulk），翻日志能一眼看出动的是哪一类',
+    ['post_bulk', 'project_bulk', 'media_bulk'].every((a) => bulkRows.some((l) => l.action === a)),
+    `已记录：${[...new Set(bulkRows.map((l) => l.action))].join(', ') || '(空)'}`
+  )
+  assert(
+    '批量动作在日志页都翻译成了中文，且文本里带条数（不是一句空泛的「批量操作」）',
+    bulkRows.length > 0 && bulkRows.every((l) => l.actionKnown === true && /\d/.test(l.text ?? '')),
+    bulkRows.map((l) => l.text).slice(0, 3).join(' · ') || '(空)'
   )
 
   // 16. 写操作必须落审计

@@ -57,6 +57,35 @@ export const MEDIA_KINDS = [
   { key: 'doc', label: '文档' },
 ]
 
+/**
+ * 媒体文件按**来源**分成三档 —— 它决定「这条记录删得掉吗」。
+ *
+ * 后台的删除不只是删掉库里那一行，还要把磁盘上的文件一并 unlink。但并非每一条登记
+ * 都有「可以删的文件」：
+ *
+ *   - `upload`：后台上传落进 `data/uploads`（持久卷），删了就是真没了。
+ *   - `build` ：随构建产物发布（`public/images` → `dist/images`），文件本体在版本库里。
+ *               运行期把它 unlink 掉，下次构建 / 部署会从仓库原样拷回来 ——
+ *               「已删除」这句话会在下次发版时变成谎话，所以这一档明确**不可删**，
+ *               界面上把删除入口关掉并说明理由，而不是让人点完再发现文件回来了。
+ *   - `other`：地址不在两个受管前缀里，磁盘上没有对应文件，删除只是移除登记项。
+ *
+ * 判定只看 URL 前缀，**不查文件是否存在**：一个「文件暂时不在盘上」的上传件
+ * 不该因为一次误读被判成不可删。
+ *
+ * 放 shared/ 的理由与上传白名单相同：界面上那句「随构建发布」与服务端拒收时
+ * 给出的理由必须是同一句话，两处各写一遍迟早会说岔。
+ */
+export const MEDIA_ORIGINS = {
+  upload: { label: '后台上传', removable: true, hint: null },
+  build: {
+    label: '随构建发布',
+    removable: false,
+    hint: '文件随构建产物发布、本体在版本库里，运行期删掉会在下次构建时回来',
+  },
+  other: { label: '外部地址', removable: true, hint: null },
+}
+
 const ICON_MIME = ['image/svg+xml', 'image/x-icon', 'image/vnd.microsoft.icon']
 const DOC_MIME = ['application/pdf', 'application/zip', 'application/json', 'text/plain', 'text/markdown']
 

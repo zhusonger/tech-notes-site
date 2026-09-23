@@ -19,15 +19,23 @@
  *    要让它「只能从把手拖」，得在 dragstart 里判断来源并 preventDefault —— 而卡片本身
  *    是可点击的（点击进编辑），两者在同一次交互里打架。pointer 事件从把手起手，
  *    点击与拖拽天然分开。
+ *
+ * 多选批量（画布上没有）：动作只取「不需要输入框」的那几个 —— 发布 / 转草稿、
+ * 设为精选 / 取消精选、删除。编辑要开表单、打开仓库是跳转、上下移依赖条目在整份
+ * 顺序里的绝对位置，这三个在批量下都不成立。选中范围默认当前列表（这一屏没有服务端
+ * 分页，所以「当前页」就是全部筛出来的那些）。卡片上的复选框自己拦掉冒泡 ——
+ * 整卡可点进编辑，不拦的话勾一下会顺带把编辑器打开。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { adminProjectsCopy as copy } from '../../data/admin'
 import {
   ApiError,
   adminApi,
+  type BulkSkipped,
   type ProjectItem,
   type ProjectListResponse,
+  type ProjectBulkAction,
   type ProjectSortKey,
   type ProjectStatus,
 } from '../adminApi'
@@ -45,6 +53,7 @@ import {
 import {
   Badge,
   Button,
+  Checkbox,
   Chip,
   ChipCount,
   ConfirmDialog,
@@ -55,12 +64,14 @@ import {
   Notice,
   PageHeader,
   RowMenu,
+  SelectionBar,
   SelectInput,
   SkeletonRows,
   Switch,
   TextArea,
   TextInput,
   Toolbar,
+  useSelection,
   type RowAction,
 } from '../ui'
 
@@ -72,6 +83,15 @@ const LANGUAGE_DOT = '#c4bdb4'
 
 /** 服务端返回的排序口径是闭集，这里再收一次，防止 URL 上被塞进别的值。 */
 const SORT_KEYS: ProjectSortKey[] = ['order', 'stars', 'updated']
+
+/** 批量动作按钮的图标，与行菜单里同名动作用同一枚 —— 同名不同图会很别扭。 */
+const BULK_ICON: Record<ProjectBulkAction, (props: { className?: string }) => ReactNode> = {
+  publish: ArrowUpIcon,
+  unpublish: UndoIcon,
+  feature: StarIcon,
+  unfeature: StarIcon,
+  delete: TrashIcon,
+}
 
 interface ProjectForm {
   title: string
@@ -138,6 +158,11 @@ export default function AdminProjects() {
   const [editing, setEditing] = useState<ProjectItem | 'new' | null>(null)
   const [pendingRemove, setPendingRemove] = useState<ProjectItem | null>(null)
 
+  /** 批量删除：确认弹层 + 回执里那张「被跳过」清单。现在是五个动作共用一个弹层 */
+  const [bulk, setBulk] = useState<ProjectBulkAction | null>(null)
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const [bulkSkipped, setBulkSkipped] = useState<BulkSkipped[]>([])
+
   /** 拖拽中的本地顺序。非空即表示「正在拖」——渲染与提交都以它为准。 */
   const [orderOverride, setOrderOverride] = useState<number[] | null>(null)
   const dragMovedRef = useRef(false)
@@ -175,6 +200,54 @@ export default function AdminProjects() {
   }
 
   const items = useMemo(() => data?.items ?? [], [data])
+
+  /* 选中范围＝当前筛出来的全部（这一屏没有分页）。判据用服务端给的顺序（`items`）
+     而不是拖拽期间的临时顺序（`shown`）：拖动一下就把选择清空，那不是拖拽该有的副作用。 */
+  const projectIds = useMemo(() => items.map((p) => p.id), [items])
+  const sel = useSelection({ pageIds: projectIds, total: items.length, filter: { language } })
+
+  const bulkSelected = useMemo(() => items.filter((p) => sel.has(p.id)), [items, sel.has, sel.count])
+
+  /*
+   * 哪个动作对哪个项目**成立**。
+   *
+   * 项目只有两个开关：**发布 / 草稿**与**精选 / 不精选**，每个开关各两个方向，
+   * 所以「这个方向有没有目标」等价于「方向上不是这个值的有多少」。
+   * 与服务端 `projects/bulk` 里逐条跳过的条件一一对应，但它只决定按钮出不出来 ——
+   * 执行时服务端还会自己判一遍。
+   */
+  const bulkActions = useMemo(() => {
+    const order: ProjectBulkAction[] = ['publish', 'unpublish', 'feature', 'unfeature', 'delete']
+    const hold = bulkSelected.length ? bulkSelected : items.filter((p) => sel.has(p.id))
+    const anyPublished = hold.some((p) => p.status === 'published')
+    const anyDraft = hold.some((p) => p.status === 'draft')
+    const anyFeatured = hold.some((p) => p.featured)
+    const anyPlain = hold.some((p) => !p.featured)
+    const ok: Record<ProjectBulkAction, boolean> = {
+      publish: anyDraft,
+      unpublish: anyPublished,
+      feature: anyPlain,
+      unfeature: anyFeatured,
+      delete: hold.length > 0,
+    }
+    return order.filter((a) => ok[a])
+  }, [bulkSelected, items, sel.has, sel.count])
+
+  /* 预告「会动几个」。`all` 模式下以服务端为准，这里不编造数字（见 AdminPosts 同源注释） */
+  const readyCount = bulk
+    ? sel.mode === 'all'
+      ? null
+      : bulk === 'publish'
+        ? bulkSelected.filter((p) => p.status === 'draft').length
+        : bulk === 'unpublish'
+          ? bulkSelected.filter((p) => p.status === 'published').length
+          : bulk === 'feature'
+            ? bulkSelected.filter((p) => !p.featured).length
+            : bulk === 'unfeature'
+              ? bulkSelected.filter((p) => p.featured).length
+              : bulkSelected.length
+    : 0
+  const bulkHeld = bulk && readyCount !== null ? Math.max(sel.count - readyCount, 0) : 0
 
   /** 拖拽期间与提交后到服务端回执之间，列表都按本地顺序渲染，避免「松手弹回去」的跳变。 */
   const shown = useMemo(() => {
@@ -303,6 +376,43 @@ export default function AdminProjects() {
     }
   }
 
+  /**
+   * 批量动作的执行：五个按钮共用这一条路径，动作随 `bulk` 传过去。
+   *
+   * 判定（哪一个成立、哪一个跳过）归服务端，这里只把范围发过去、把账接回来 ——
+   * 前端再复述一遍准入规则，就多一处会说岔的地方。
+   */
+  const runBulk = async () => {
+    if (!bulk || readyCount === 0) return
+    setBulkBusy(true)
+    setBulkSkipped([])
+    try {
+      const res = await adminApi.bulkProjects(sel.scope(), bulk)
+      setNotice({
+        tone: 'success',
+        text: res.affected
+          ? (res.skipped.length ? copy.bulk.doneWithSkips : copy.bulk.done)
+              .replace('{done}', String(res.affected))
+              .replace('{skipped}', String(res.skipped.length))
+          : copy.bulk.none,
+      })
+      setBulkSkipped(res.skipped)
+      setBulk(null)
+      sel.clear()
+      await load()
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setNotice({ tone: 'error', text: err.message })
+        // 409：服务端算出的集合与界面对不上，列表多半已经变了 → 立刻重取
+        if (err.status === 409) await load()
+      } else {
+        setNotice({ tone: 'error', text: copy.bulk.failed })
+      }
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
   const rowActions = (p: ProjectItem): RowAction[] => {
     const actions: RowAction[] = [
       { key: 'edit', label: copy.rowMenu.edit, icon: <PencilIcon className="h-[14px] w-[14px]" />, onSelect: () => setEditing(p) },
@@ -387,9 +497,76 @@ export default function AdminProjects() {
         }
       />
 
+      {/* 批量操作条：选中项非空才出现。位置在筛选条与卡片墙之间，
+          筛选条继续可见 —— 你得知道自己是在哪个语言的筛选下选的 */}
+      {sel.count > 0 ? (
+        <SelectionBar
+          count={sel.count}
+          label={copy.bulk.selected}
+          clearLabel={copy.bulk.clear}
+          onClear={sel.clear}
+          hint={sel.mode === 'all' ? copy.bulk.allScopeHint : undefined}
+          lead={
+            sel.mode === 'page' && items.length > 0 && items.length > bulkSelected.length ? (
+              <button
+                type="button"
+                onClick={sel.selectAllFiltered}
+                className="font-cn text-[12px] leading-none text-[var(--color-primary)] underline-offset-2 hover:underline"
+              >
+                {copy.bulk.selectAllFiltered.replace('{n}', String(items.length))}
+              </button>
+            ) : sel.mode === 'all' ? (
+              <button
+                type="button"
+                onClick={sel.clear}
+                className="font-cn text-[12px] leading-none text-[var(--color-primary)] underline-offset-2 hover:underline"
+              >
+                {copy.bulk.exitAllScope}
+              </button>
+            ) : undefined
+          }
+          actions={
+            <>
+              {bulkActions.map((action) => {
+                /* 图标跟着动作走：精选用星、发布用箭头、删除用垃圾桶。一排按钮里
+                   五个同样的图标会让「哪一个真删库」这个问题不容易回答。
+                   组件先取出来再用 —— JSX 标签名不接受带方括号的成员表达式。 */
+                const Icon = BULK_ICON[action]
+                return (
+                  <Button
+                    key={action}
+                    variant={action === 'delete' ? 'danger' : 'outline'}
+                    size="sm"
+                    icon={<Icon className="h-[13px] w-[13px]" />}
+                    onClick={() => setBulk(action)}
+                  >
+                    {copy.bulk.actions[action].label}
+                  </Button>
+                )
+              })}
+            </>
+          }
+        />
+      ) : null}
+
       {notice ? (
         <Notice tone={notice.tone} onClose={() => setNotice(null)}>
           {notice.text}
+        </Notice>
+      ) : null}
+
+      {/* 被跳过的条目逐条摆出来，理由来自服务端回的 `skipped` */}
+      {bulkSkipped.length ? (
+        <Notice tone="warn" onClose={() => setBulkSkipped([])}>
+          <span className="flex flex-col gap-[5px]">
+            <span>{copy.bulk.skipped.replace('{n}', String(bulkSkipped.length))}</span>
+            {bulkSkipped.map((s) => (
+              <span key={s.id} className="text-[11.5px]">
+                · {s.label}
+                <span className="opacity-75"> · {s.reason}</span>
+              </span>
+            ))}
+          </span>
         </Notice>
       ) : null}
 
@@ -415,6 +592,8 @@ export default function AdminProjects() {
               key={p.id}
               project={p}
               busy={busyId === p.id}
+              selected={sel.has(p.id)}
+              onToggle={(on) => sel.toggle(p.id, on)}
               dragging={Boolean(orderOverride) && dragMovedRef.current}
               canReorder={canReorder}
               actions={rowActions(p)}
@@ -468,6 +647,33 @@ export default function AdminProjects() {
         onConfirm={() => pendingRemove && void remove(pendingRemove)}
         onCancel={() => setPendingRemove(null)}
       />
+
+      {/* 批量确认。按钮清单由选中项决定（见 `bulkActions`），各自的话术成套放在文案里，
+          所以这里有五个动作也不用写五份 JSX。数量数得准就给准确值，数不准就不给。 */}
+      <ConfirmDialog
+        open={bulk !== null}
+        title={bulk ? copy.bulk.actions[bulk].title.replace('{n}', String(readyCount ?? sel.count)) : ''}
+        message={
+          bulk ? (
+            <span className="flex flex-col gap-[8px]">
+              <span>{copy.bulk.actions[bulk].message}</span>
+              {bulkHeld > 0 ? (
+                <span className="text-[var(--color-ink-3)]">
+                  {copy.bulk.skipNote
+                    .replace('{hint}', copy.bulk.actions[bulk].skipHint)
+                    .replace('{n}', String(bulkHeld))}
+                </span>
+              ) : null}
+            </span>
+          ) : null
+        }
+        confirmLabel={bulk ? copy.bulk.actions[bulk].label : ''}
+        tone={bulk === 'delete' ? 'danger' : 'default'}
+        busy={bulkBusy}
+        confirmDisabled={readyCount === 0}
+        onConfirm={() => void runBulk()}
+        onCancel={() => setBulk(null)}
+      />
     </div>
   )
 }
@@ -476,6 +682,8 @@ export default function AdminProjects() {
 function ProjectCard({
   project,
   busy,
+  selected,
+  onToggle,
   dragging,
   canReorder,
   actions,
@@ -485,6 +693,8 @@ function ProjectCard({
 }: {
   project: ProjectItem
   busy: boolean
+  selected: boolean
+  onToggle: (on: boolean) => void
   dragging: boolean
   canReorder: boolean
   actions: readonly RowAction[]
@@ -505,11 +715,23 @@ function ProjectCard({
       className={[
         'flex min-h-[240px] cursor-pointer flex-col gap-[14px] rounded-[14px] border bg-[var(--admin-surface)] p-[22px] transition-colors',
         busy ? 'opacity-60' : '',
-        dragging ? 'border-[var(--color-primary)]' : 'border-[var(--color-line)] hover:border-[var(--color-primary)]',
+        selected
+          ? 'border-[var(--color-primary)] bg-[#fff9f7]'
+          : dragging
+            ? 'border-[var(--color-primary)]'
+            : 'border-[var(--color-line)] hover:border-[var(--color-primary)]',
       ].join(' ')}
     >
-      {/* 头部：图标 + 更多 + 拖拽把手。两个控件都要拦掉冒泡，否则点菜单会顺带打开编辑器。 */}
+      {/* 头部：勾选框 + 图标 + 更多 + 拖拽把手。三个控件都要拦掉冒泡，
+          否则点它们会顺带打开编辑器 —— 整卡可点这件事在这里是副作用而不是意图。 */}
       <div className="flex items-center gap-[8px]">
+        <span onClick={(e) => e.stopPropagation()}>
+          <Checkbox
+            checked={selected}
+            onChange={onToggle}
+            label={copy.bulk.selectRow.replace('{title}', project.title)}
+          />
+        </span>
         <span className="flex h-[40px] w-[40px] shrink-0 items-center justify-center rounded-[11px] bg-[var(--admin-soft-strong)] text-[var(--color-primary)]">
           <BoxIcon className="h-[20px] w-[20px]" />
         </span>

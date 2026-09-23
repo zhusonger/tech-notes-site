@@ -8,7 +8,7 @@
  * 后台内部则相反：8 个功能页的筛选条、下拉、行菜单长得一样，各写一份必然发散
  * （第一版就把同一个 select 在文章列表里写过一次）。所以后台共用一套原子。
  */
-import { useEffect, useRef, useState, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react'
+import { useEffect, useMemo, useRef, useState, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertIcon, ArrowLeftIcon, ArrowRightIcon, CheckIcon, ChevronDownIcon, MoreIcon, XIcon } from './AdminIcons'
 
@@ -931,6 +931,7 @@ export function ConfirmDialog({
   cancelLabel = '取消',
   tone = 'default',
   busy = false,
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: {
@@ -941,6 +942,14 @@ export function ConfirmDialog({
   cancelLabel?: string
   tone?: 'default' | 'danger'
   busy?: boolean
+  /**
+   * 确认键置灰。
+   *
+   * 与 `busy` 分开：`busy` 是「正在跑」，这里表达的是「按下去也不会有任何改动」——
+   * 批量操作里一批选中项可能全部不符合条件，那时候让人点下去收到一句
+   * 「没有任何改动」，不如在摆着原因的这一层就停住。
+   */
+  confirmDisabled?: boolean
   onConfirm: () => void
   onCancel: () => void
 }) {
@@ -961,6 +970,7 @@ export function ConfirmDialog({
               variant={tone === 'danger' ? 'danger' : 'primary'}
               size="sm"
               loading={busy}
+              disabled={confirmDisabled}
               onClick={onConfirm}
             >
               {confirmLabel}
@@ -972,4 +982,235 @@ export function ConfirmDialog({
       <p className="font-cn text-[12.5px] leading-[1.8] text-[var(--color-ink-2)]">{message}</p>
     </Modal>
   )
+}
+
+/* --------------------------------------------------------------------- 多选 */
+
+/**
+ * 复选框。
+ *
+ * 用原生 `input[type=checkbox]` + `appearance-none` 自绘外观，而不是手写一个
+ * `div` 加 `role="checkbox"`：键盘（空格切换）、`indeterminate`（全选时的第三种状态）、
+ * 表单语义都由浏览器给。手写版要把这三样一条条补回来，而它们恰恰是最容易漏的 ——
+ * 漏掉 `indeterminate` 的后果是「全选」在两个状态之间没有中间态可看。
+ *
+ * `indeterminate` **没有对应的 HTML attribute**，只能通过 DOM 属性写，所以这里
+ * 用一个 ref 在渲染后回写 —— 别指望它能从 props 一路传到 `<input>` 上。
+ *
+ * 勾与横杠画在 input 之上（绝对定位的 input 会盖住同层的普通元素，所以那两个
+ * 图形自己也得是定位元素）。勾复用公共图标，横杠就地画一条 —— 图标库里没有它。
+ */
+export function Checkbox({
+  checked,
+  indeterminate = false,
+  disabled = false,
+  label,
+  onChange,
+  className = '',
+}: {
+  checked: boolean
+  indeterminate?: boolean
+  disabled?: boolean
+  /** 无障碍名。列表里的复选框没有可见文字，这一项不能省 */
+  label: string
+  onChange: (checked: boolean) => void
+  className?: string
+}) {
+  const ref = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = indeterminate && !checked
+  }, [indeterminate, checked])
+
+  const on = checked || indeterminate
+  return (
+    <span className={['relative inline-flex h-[16px] w-[16px] shrink-0', className].join(' ')}>
+      <input
+        ref={ref}
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        aria-label={label}
+        onChange={(e) => onChange(e.target.checked)}
+        className={[
+          'absolute inset-0 h-[16px] w-[16px] appearance-none rounded-[5px] border bg-[var(--admin-surface)] transition-colors',
+          disabled ? 'cursor-not-allowed border-[#ded7ce]' : 'cursor-pointer border-[#cfc7bd]',
+          'checked:border-[var(--color-primary)] checked:bg-[var(--color-primary)]',
+          'indeterminate:border-[var(--color-primary)] indeterminate:bg-[var(--color-primary)]',
+          'hover:border-[var(--color-primary)]',
+          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary-soft)]',
+        ].join(' ')}
+      />
+      {on ? (
+        <span className="pointer-events-none relative flex h-[16px] w-[16px] items-center justify-center text-white">
+          {indeterminate && !checked ? (
+            <svg viewBox="0 0 12 12" className="relative h-[10px] w-[10px]" aria-hidden="true">
+              <path d="M2.6 6h6.8" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+            </svg>
+          ) : (
+            /* 24 视口的描边图标缩到 10px，默认 1.6 的线宽只有 0.67px —— 加粗到 4 才看得见 */
+            <CheckIcon className="relative h-[10px] w-[10px]" strokeWidth={4} />
+          )}
+        </span>
+      ) : null}
+    </span>
+  )
+}
+
+/**
+ * 批量操作条。
+ *
+ * 位置在**筛选条与列表之间**，而不是盖掉筛选条：筛选条要继续可见 —— 你得知道
+ * 自己是在哪个筛选下选的这几项；而动作条要紧贴它所作用的那批行。
+ *
+ * 文案里的条数由调用方传进来（`{n}` 占位），不在这一层拼 —— 三个屏对「项 / 篇 / 个」
+ * 的量词不同，而量词属于各自屏的文案。
+ */
+export function SelectionBar({
+  count,
+  label,
+  clearLabel,
+  actions,
+  hint,
+  lead,
+  onClear,
+}: {
+  count: number
+  /** 带 `{n}` 的句式 */
+  label: string
+  clearLabel: string
+  /** 「移入回收站 / 彻底删除」这些按钮 */
+  actions: ReactNode
+  /**
+   * 对那个数字的解释。条数是**使用者看得见的唯一凭据**，但「当前筛选下全部 42 篇」
+   * 与「本页 8 篇」是两件完全不同的事 —— 这一行就是用来消除这个歧义的。
+   */
+  hint?: ReactNode
+  /** 范围切换：「选中符合当前筛选的全部 N 条」 */
+  lead?: ReactNode
+  onClear: () => void
+}) {
+  const title = label.replace('{n}', String(count))
+  return (
+    <section
+      className="flex flex-wrap items-center gap-[8px] rounded-[14px] border border-[var(--color-primary)] bg-[var(--color-primary-soft)] px-[16px] py-[10px]"
+      role="region"
+      aria-label={title}
+    >
+      <span className="font-cn text-[12.5px] font-semibold leading-none text-[var(--color-primary)]">{title}</span>
+      {hint ? (
+        <span className="font-cn text-[11.5px] leading-none text-[var(--color-primary)] opacity-80">{hint}</span>
+      ) : null}
+      <span className="h-[14px] w-px bg-[var(--color-primary)] opacity-30" aria-hidden="true" />
+      {lead}
+      {actions}
+      <span className="flex-1" />
+      <button
+        type="button"
+        onClick={onClear}
+        className="font-cn text-[12px] leading-none text-[var(--color-primary)] underline-offset-2 hover:underline"
+      >
+        {clearLabel}
+      </button>
+    </section>
+  )
+}
+
+/**
+ * 多选，两种范围。**界面上的每一句话和交给接口的那段范围都由它产出，三屏共用。**
+ *
+ *   page —— 显式勾选当前页这几条，请求体是 `ids`
+ *   all  —— 「选中符合当前筛选的全部 N 条」，请求体是 `filter` + `exclude`
+ *
+ * `ids` 与 `filter` 二选一，不能两个都给（服务端会 400）。这个互斥**不需要界面的
+ * 纪律来保证**：`scope()` 一次只可能吐出其中一种形状，按错按钮这件事在类型上不成立。
+ *
+ * 为什么 all 模式不把几万个 id 拉下来传回去 —— `ids` 传的是**数据的副本**，
+ * 而副本会过期：从勾上到提交之间可能有别处写入（另一台设备发了文章、清理定时器删了几条）。
+ * `filter` 传的是**意图**，服务端按意图现取集合，取的就是那一刻的真实情况。
+ * `exclude` 用来表达「全部，除了这几条」——「全选之后反选」只有这一种说法。
+ *
+ * `expected` 是界面当时显示的那个数：服务端算出来的集合若与它对不上就拒绝执行（409）。
+ * 免得在一次「列表已经变了」的事实上，照着旧名单把别的条目删掉。
+ */
+export function useSelection({
+  pageIds,
+  total,
+  filter,
+}: {
+  /** 当前页可见行的 id，顺序即界面顺序 */
+  pageIds: readonly number[]
+  /** 当前筛选下的总条数（不是本页条数） */
+  total: number
+  /** 当前筛选条件，原样交给服务端 */
+  filter: Record<string, string>
+}) {
+  const [picked, setPicked] = useState<number[]>([])
+  /** all 模式下被手动反选的那几条 */
+  const [dropped, setDropped] = useState<number[]>([])
+  const [allMode, setAllMode] = useState(false)
+
+  /* 依赖用 join 出来的串而不是 ids 数组本身：调用方传的多半是
+     `pageItems.map(...)` 这种每次渲染都新建的数组，依赖它等于每帧重算一遍。 */
+  const idKey = pageIds.join(',')
+  const filterKey = JSON.stringify(filter)
+
+  const page = useMemo(() => new Set(pageIds), [idKey])
+  const pickedSet = useMemo(() => new Set(picked), [picked.join(',')])
+  const droppedSet = useMemo(() => new Set(dropped), [dropped.join(',')])
+
+  /*
+   * 列表一换代（翻页 / 切筛选 / 改排序 / 增删之后重取）就回到「一条都没选」。
+   * 判据是这个 key，而不是「记得在 useEffect 里 clear()」—— 那种约定漏一处
+   * 就是一个跨页提交；这里漏不掉，因为换代这件事本身就写在依赖里。
+   */
+  useEffect(() => {
+    setPicked([])
+    setDropped([])
+    setAllMode(false)
+  }, [idKey, filterKey])
+
+  const pageSelected = picked.filter((id) => page.has(id))
+  const count = allMode ? Math.max(total - dropped.length, 0) : pageSelected.length
+
+  return {
+    mode: allMode ? ('all' as const) : ('page' as const),
+    /** 界面上「选中了 N 条」的那个 N */
+    count,
+    has: (id: number) => (allMode ? !droppedSet.has(id) : pickedSet.has(id)),
+    allSelected: pageIds.length > 0 && (allMode ? dropped.length === 0 : pageSelected.length === pageIds.length),
+    /** 表头那个复选框的第三种状态：选了一部分 */
+    partial: count > 0 && pageIds.length > 0 && !(allMode ? dropped.length === 0 : pageSelected.length === pageIds.length),
+    toggle: (id: number, on: boolean) => {
+      if (allMode) {
+        setDropped((prev) => (on ? prev.filter((x) => x !== id) : prev.includes(id) ? prev : [...prev, id]))
+      } else {
+        setPicked((prev) => (on ? (prev.includes(id) ? prev : [...prev, id]) : prev.filter((x) => x !== id)))
+      }
+    },
+    /** 表头复选框：全选 / 取消本页。all 模式下点它是退出全范围。 */
+    toggleAll: () => {
+      if (allMode) {
+        setAllMode(false)
+        setDropped([])
+        setPicked([])
+        return
+      }
+      setPicked(pageSelected.length === pageIds.length ? [] : [...pageIds])
+    },
+    selectAllFiltered: () => {
+      setAllMode(true)
+      setDropped([])
+    },
+    clear: () => {
+      setPicked([])
+      setDropped([])
+      setAllMode(false)
+    },
+    /** 交给接口的选中范围。两种形状互斥，见上面的说明。 */
+    scope: () =>
+      allMode
+        ? { filter, exclude: dropped, expected: count }
+        : { ids: pageSelected },
+  }
 }

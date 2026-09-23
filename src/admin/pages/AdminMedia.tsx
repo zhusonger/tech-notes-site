@@ -18,16 +18,31 @@
  *     做出来只会是个假按钮。
  *   - **「存储用量 24%」那根进度条**：没有配额这一说，百分比只能编。
  *     这里换成真实占用（文件数 + 字节数），数字全部来自磁盘。
+ *
+ * 画布之外补上的两件（都是「文件库 vs 文档列表」的差别逼出来的）：
+ *
+ *   - **能不能删文件，取决于它从哪来。** 后台上传的落在持久卷上，删了就是真没了；
+ *     随构建产物发布的素材（Hero、头像这类）本体在版本库里，运行期删掉会在下次
+ *     构建时被原样拷回来。所以后者的删除入口直接关掉并写明理由 —— 与其让人点完
+ *     发现文件回来了，不如一开始就说清楚（`policy.origins` 由服务端下发，
+ *     界面上的禁用与接口的拒收读的是同一份）。
+ *   - **多选批量删除。** 勾选（批量）与「点击进详情面板查看」是**两件事**，所以
+ *     它们是两个独立的信号：勾选看左上角那个复选框与橙色底，详情看右侧面板里
+ *     正在展示哪个文件。勾选范围限于当前页（见 `ui.tsx` 的 `usePageSelection`）——
+ *     被引用的文件与随构建发布的素材由服务端跳过，理由在操作后的清单里逐条给出。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertIcon, CopyIcon, ExternalIcon, TrashIcon } from '../AdminIcons'
 import {
   adminApi,
   ApiError,
+  type BulkSkipped,
   type MediaFacets,
   type MediaItem,
   type MediaKind,
   type MediaListResponse,
+  type MediaOrigin,
+  type MediaOriginRule,
   type MediaSortKey,
 } from '../adminApi'
 import { adminMediaCopy as copy } from '../../data/admin'
@@ -36,6 +51,7 @@ import {
   Button,
   CardFoot,
   CardHead,
+  Checkbox,
   Chip,
   ChipCount,
   ConfirmDialog,
@@ -48,9 +64,11 @@ import {
   PageHeader,
   Pager,
   ReadonlyValue,
+  SelectionBar,
   SkeletonRows,
   TextInput,
   Toolbar,
+  useSelection,
 } from '../ui'
 
 /** 网格与列表每页条数不同：网格一行 3–4 个，列表一行 1 个。 */
@@ -170,6 +188,11 @@ export default function AdminMedia() {
   const [removing, setRemoving] = useState<MediaItem | null>(null)
   const [removeBusy, setRemoveBusy] = useState(false)
 
+  /** 批量删除：确认弹层开关、进行中标记、以及回执里那张「被跳过」清单 */
+  const [bulkOpen, setBulkOpen] = useState(false)
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const [bulkSkipped, setBulkSkipped] = useState<BulkSkipped[]>([])
+
   const [page, setPage] = useState(1)
   const fileRef = useRef<HTMLInputElement>(null)
   /** 拖拽进出会在子元素上反复触发 `dragleave`，用计数抵消，否则悬停态会闪。 */
@@ -181,7 +204,23 @@ export default function AdminMedia() {
   const missingCount = (facets ?? data)?.missing ?? 0
   const kinds = data?.kinds ?? []
   const sorts = data?.sorts ?? []
-  const policy = data?.policy ?? { accept: '', hint: '', maxBytes: 0, maxAlt: 0 }
+  /** `origins` 在加载态是空表：那时列表里还没有任何文件，查不到也只影响不到谁。
+      类型要显式标注 —— 直接写 `{}` 会被推成空对象类型，用 `item.origin` 索引就报错。 */
+  const policy = data?.policy ?? {
+    accept: '',
+    hint: '',
+    maxBytes: 0,
+    maxAlt: 0,
+    origins: {} as Record<MediaOrigin, MediaOriginRule>,
+  }
+
+  /**
+   * 来源策略。界面需要它回答两件事：这条能不能删、删不掉时说什么。
+   * 两件事都由服务端下发（`policy.origins`），前端不判断「哪种前缀算谁」——
+   * 那正是 `server/media.mjs` 里 `originOf` 的职责，抄一份就多一处会说岔的地方。
+   */
+  const originRule = (item: MediaItem) => policy.origins[item.origin]
+  const removable = (item: MediaItem) => Boolean(originRule(item)?.removable)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -225,6 +264,33 @@ export default function AdminMedia() {
     () => items.slice((page - 1) * PAGE_SIZE[view], page * PAGE_SIZE[view]),
     [items, page, view]
   )
+
+  /* 勾选范围默认是**当前页**（网格 12 / 列表 24 条），翻页或切分组即清空 —— 见 `useSelection`。
+     此外还可以升级为「选中当前分组的全部」：那条路走 `filter` 而不是把 id 全传回来。 */
+  const pageIds = useMemo(() => pageItems.map((i) => i.id), [pageItems])
+  const sel = useSelection({ pageIds, total: items.length, filter: { kind } })
+
+  const bulkSelected = useMemo(() => items.filter((i) => sel.has(i.id)), [items, sel.has, sel.count])
+
+  /**
+   * 弹层上的两个数：会删几个、会跳过几个。
+   *
+   * 两个判据（来源可否删、有没有被引用）都是服务端给的字段，前端只是把它们摆出来。
+   * 提交时发的是**全部勾选的 id**：真正的判定归服务端，这里算错了也只是弹层上的
+   * 数字不准，不会让一张还有引用的图被删掉。
+   */
+  const bulkDeletable = bulkSelected.filter((i) => removable(i) && i.referenceCount === 0)
+  const bulkHeld = bulkSelected.length - bulkDeletable.length
+
+  /*
+   * 「删除」按钮要不要出现。
+   *
+   * 本页模式下按结算结果决定：一个都删不掉时不给按钮（正是因为这句话说得出，
+   * 才有必要让它消失 —— 见下面弹层的 `none` 文案）。
+   * 全选模式下屏幕上之外的那几十张是什么属性并不知道，此时宁可把按钮留着、
+   * 由服务端逐条判定并带回清单，也不要为了「按钮干净」把一条能删的一起藏起来。
+   */
+  const bulkActions: 'delete'[] = sel.mode === 'all' || bulkDeletable.length > 0 ? ['delete'] : []
 
   const altDirty = selected ? altDraft.trim() !== selected.alt : false
   const activeKindLabel = kinds.find((k) => k.key === kind)?.label ?? ''
@@ -307,7 +373,9 @@ export default function AdminMedia() {
       const res = await adminApi.deleteMedia(removing.id, removing.referenceCount > 0)
       setFacets(res)
       setNotice(copy.remove.done.replace('{name}', removing.filename))
-      if (!res.fileRemoved && removing.url.startsWith('/uploads/')) setWarn(copy.remove.fileKept)
+      /* 只有「本该删掉磁盘文件的那一档」才谈得上没删掉：随构建发布的素材压根不删文件，
+         对它报一句「请手动清理」是在让人去找一个删了也没用的东西。 */
+      if (res.origin === 'upload' && !res.fileRemoved) setWarn(copy.remove.fileKept)
       setRemoving(null)
       setSelectedId(null)
       await load()
@@ -315,6 +383,41 @@ export default function AdminMedia() {
       setWarn(err instanceof ApiError ? err.message : copy.remove.failed)
     } finally {
       setRemoveBusy(false)
+    }
+  }
+
+  /** 批量删除。判定归服务端；被跳过的条目连同理由原样回带，逐条摆在提示条里。 */
+  const runBulk = async () => {
+    setBulkBusy(true)
+    setWarn('')
+    setNotice('')
+    setBulkSkipped([])
+    try {
+      const res = await adminApi.bulkDeleteMedia(sel.scope())
+      setFacets(res)
+      setNotice(
+        res.affected
+          ? (res.skipped.length ? copy.bulk.doneWithSkips : copy.bulk.done)
+              .replace('{done}', String(res.affected))
+              .replace('{skipped}', String(res.skipped.length))
+          : copy.bulk.none.replace('{n}', String(sel.count))
+      )
+      setBulkSkipped(res.skipped)
+      setBulkOpen(false)
+      /* 详情面板可能正停在刚被删掉的那一条上 —— 与其让它继续展示一个不存在的文件，不如收起来 */
+      setSelectedId(null)
+      sel.clear()
+      await load()
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setWarn(err.message)
+        /* 409：服务端算出的集合与界面不一致，列表多半已经变了 → 立刻重取 */
+        if (err.status === 409) await load()
+      } else {
+        setWarn(copy.bulk.failed)
+      }
+    } finally {
+      setBulkBusy(false)
     }
   }
 
@@ -401,6 +504,66 @@ export default function AdminMedia() {
         }
       />
 
+      {/* 批量操作条：勾选项非空才出现，位置在筛选条与文件卡之间 */}
+      {sel.count > 0 ? (
+        <SelectionBar
+          count={sel.count}
+          label={copy.bulk.selected}
+          clearLabel={copy.bulk.clear}
+          onClear={sel.clear}
+          hint={sel.mode === 'all' ? copy.bulk.allScopeHint : undefined}
+          lead={
+            sel.mode === 'page' && items.length > pageItems.length ? (
+              <button
+                type="button"
+                onClick={sel.selectAllFiltered}
+                className="font-cn text-[12px] leading-none text-[var(--color-primary)] underline-offset-2 hover:underline"
+              >
+                {copy.bulk.selectAllFiltered.replace('{n}', String(items.length))}
+              </button>
+            ) : sel.mode === 'all' ? (
+              <button
+                type="button"
+                onClick={sel.clear}
+                className="font-cn text-[12px] leading-none text-[var(--color-primary)] underline-offset-2 hover:underline"
+              >
+                {copy.bulk.exitAllScope}
+              </button>
+            ) : undefined
+          }
+          actions={
+            <>
+              {bulkActions.map((action) => (
+                <Button
+                  key={action}
+                  variant="danger"
+                  size="sm"
+                  icon={<TrashIcon className="h-[13px] w-[13px]" />}
+                  onClick={() => setBulkOpen(true)}
+                >
+                  {copy.bulk.actions[action].label}
+                </Button>
+              ))}
+            </>
+          }
+        />
+      ) : null}
+
+      {/* 被跳过的条目逐条摆出来，理由（含来源原因）来自服务端回的 `skipped` */}
+      {bulkSkipped.length ? (
+        <Notice tone="warn" onClose={() => setBulkSkipped([])}>
+          <span className="flex flex-col gap-[5px]">
+            <span>{copy.bulk.skipped.replace('{n}', String(bulkSkipped.length))}</span>
+            {bulkSkipped.map((s) => (
+              <span key={s.id} className="text-[11.5px]">
+                · {s.label}
+                <span className="opacity-75"> · {s.reason}</span>
+              </span>
+            ))}
+          </span>
+        </Notice>
+      ) : null}
+
       {/* 主区一行：左文件卡 + 右详情面板。整行给定高度，让网格与面板各自内部滚动，
           而不是把整页推长 —— 否则选中文件后整页会跟着跳。 */}
       <div className="flex min-h-[520px] flex-1 items-stretch gap-[20px]">
@@ -415,9 +578,27 @@ export default function AdminMedia() {
                     .replace('{sort}', activeSortLabel)
             }
             right={
-              <span className="rounded-[12px] border border-[var(--color-line)] bg-[var(--admin-soft)] px-[11px] py-[5px] font-cn text-[11px] text-[var(--color-ink-2)]">
-                {selected ? copy.card.selected.replace('{n}', '1') : copy.card.noSelection}
-              </span>
+              <>
+                {/* 全选（当前页）。文案带出来是为了可发现性 —— 一个孤零零的方框
+                    在文件网格上很容易被当成装饰 */}
+                <span className="flex items-center gap-[7px]">
+                  <Checkbox
+                    checked={sel.allSelected}
+                    indeterminate={sel.partial}
+                    disabled={pageItems.length === 0}
+                    onChange={() => sel.toggleAll()}
+                    label={copy.bulk.selectAll}
+                  />
+                  <span className="font-cn text-[11px] text-[var(--color-ink-3)]">
+                    {copy.bulk.selectAll}
+                  </span>
+                </span>
+                {/* 这颗胶囊说的是**勾选**的数量（也就是删除会影响到的那批），
+                    不是右面板在看哪个文件 —— 后者面板自己会说（空态写着「从左侧选一个」） */}
+                <span className="rounded-[12px] border border-[var(--color-line)] bg-[var(--admin-soft)] px-[11px] py-[5px] font-cn text-[11px] text-[var(--color-ink-2)]">
+                  {sel.count > 0 ? copy.card.selected.replace('{n}', String(sel.count)) : copy.card.noSelection}
+                </span>
+              </>
             }
           />
 
@@ -464,6 +645,8 @@ export default function AdminMedia() {
                         key={item.id}
                         item={item}
                         active={item.id === selectedId}
+                        checked={sel.has(item.id)}
+                        onToggle={(on) => sel.toggle(item.id, on)}
                         onSelect={() => setSelectedId(item.id)}
                       />
                     ))}
@@ -484,6 +667,8 @@ export default function AdminMedia() {
                         key={item.id}
                         item={item}
                         active={item.id === selectedId}
+                        checked={sel.has(item.id)}
+                        onToggle={(on) => sel.toggle(item.id, on)}
                         onSelect={() => setSelectedId(item.id)}
                       />
                     ))}
@@ -513,6 +698,9 @@ export default function AdminMedia() {
           altLimit={policy.maxAlt}
           saving={saving}
           loading={loading && !data}
+          originLabel={selected ? (originRule(selected)?.label ?? '') : ''}
+          /** 非空即表示这一档删不掉；文案（理由）由服务端下发，前端不自己编 */
+          originHint={selected && !removable(selected) ? (originRule(selected)?.hint ?? '') : ''}
           onChangeAlt={(v) => {
             setAltDraft(v)
             setNotice('')
@@ -564,6 +752,48 @@ export default function AdminMedia() {
         }
         onConfirm={() => void confirmRemove()}
         onCancel={() => setRemoving(null)}
+      />
+
+      {/*
+        批量确认。
+
+        标题里的数量是**真正会被删掉的数量**（`bulkDeletable`），不是勾选总数：
+        标题要说清「按下确认会发生什么」，被跳过的那几项由下面那句说明 ——
+        它们为什么删不掉，则等操作之后由服务端逐条给出（那是判定的一部分，
+        前端复述一份就多一个会说岔的地方）。
+        一个都删不掉时按钮是灰的：与其让人点下去收到一句「没有可删除的文件」，
+        不如在摆着原因的这一层就停住。
+      */}
+      <ConfirmDialog
+        open={bulkOpen}
+        tone="danger"
+        busy={bulkBusy}
+        title={copy.bulk.actions.delete.title.replace(
+          '{n}',
+          /* 全选模式下这一批有多少张是不知道的，这时给总数而不是一个看着精确的数 */
+          String(sel.mode === 'all' ? sel.count : bulkDeletable.length)
+        )}
+        confirmLabel={copy.bulk.actions.delete.label}
+        confirmDisabled={sel.mode === 'all' ? false : bulkDeletable.length === 0}
+        cancelLabel={copy.remove.cancel}
+        message={
+          <span className="flex flex-col gap-[8px]">
+            <span>
+              {sel.mode === 'all' || bulkDeletable.length
+                ? copy.bulk.actions.delete.message
+                : copy.bulk.none.replace('{n}', String(sel.count))}
+            </span>
+            {sel.mode !== 'all' && bulkHeld > 0 ? (
+              <span className="text-[var(--color-ink-3)]">
+                {copy.bulk.skipNote
+                  .replace('{hint}', copy.bulk.actions.delete.skipHint)
+                  .replace('{n}', String(bulkHeld))}
+              </span>
+            ) : null}
+          </span>
+        }
+        onConfirm={() => void runBulk()}
+        onCancel={() => setBulkOpen(false)}
       />
     </div>
   )
@@ -634,71 +864,114 @@ function Thumb({ item, className = '' }: { item: MediaItem; className?: string }
 function FileTile({
   item,
   active,
+  checked,
+  onToggle,
   onSelect,
 }: {
   item: MediaItem
+  /** 右侧详情面板正在展示它 */
   active: boolean
+  /** 批量勾选中 */
+  checked: boolean
+  onToggle: (on: boolean) => void
   onSelect: () => void
 }) {
   return (
-    <button
-      type="button"
-      onClick={onSelect}
-      aria-pressed={active}
+    <div
       data-media-id={item.id}
       className={[
-        'flex h-[199px] w-[241px] shrink-0 flex-col gap-[8px] rounded-[12px] border p-[8px] text-left transition-colors',
-        active
-          ? 'border-[var(--color-primary)] bg-[#fff9f7]'
-          : 'border-[var(--color-line)] bg-[var(--admin-surface)] hover:border-[var(--color-primary)]',
+        'relative flex h-[199px] w-[241px] shrink-0 flex-col gap-[8px] rounded-[12px] border p-[8px] transition-colors',
+        /* 「勾选中」与「正在查看」用两个不同的信号：前者看左上角那个复选框与橙底，
+           后者看描边。两者叠在同一个卡上时，仍能一眼分清是哪一种语义。 */
+        checked
+          ? 'border-[var(--color-primary)] bg-[var(--color-primary-soft)]'
+          : active
+            ? 'border-[var(--color-primary)] bg-[#fff9f7]'
+            : 'border-[var(--color-line)] bg-[var(--admin-surface)] hover:border-[var(--color-primary)]',
       ].join(' ')}
     >
-      <Thumb item={item} className="h-[128px] w-full rounded-[8px]" />
-      <span className="truncate font-latin text-[11px] text-[var(--color-ink)]">{item.filename}</span>
-      <span className="flex items-center gap-[6px] font-cn text-[10px] text-[var(--color-ink-3)]">
-        <span className="uppercase">{item.mime.split('/')[1] ?? copy.detail.unknown}</span>
-        <span>·</span>
-        <span>{item.bytesLabel}</span>
-        {item.referenceCount > 0 ? (
-          <>
-            <span>·</span>
-            <span>被引用 {item.referenceCount}</span>
-          </>
-        ) : null}
+      {/* 勾选框与「点开详情」是**两个并列的按钮**，不是把一个 input 塞进 button 里 ——
+          后者既不合规（button 里不许有交互内容），点起来也会同时触发两件事。
+          所以勾选框用绝对定位浮在缩略图左上角、做卡片的兄弟节点。 */}
+      <span className="absolute left-[15px] top-[15px] z-[1] flex h-[22px] w-[22px] items-center justify-center rounded-[7px] bg-white/85 backdrop-blur-[2px]">
+        <Checkbox
+          checked={checked}
+          onChange={onToggle}
+          label={copy.bulk.selectRow.replace('{name}', item.filename)}
+        />
       </span>
-    </button>
+      <button type="button" onClick={onSelect} className="block shrink-0 text-left">
+        <Thumb item={item} className="h-[128px] w-full rounded-[8px]" />
+      </button>
+      <button
+        type="button"
+        onClick={onSelect}
+        aria-pressed={active}
+        className="flex min-w-0 flex-col gap-[6px] text-left"
+      >
+        <span className="truncate font-latin text-[11px] text-[var(--color-ink)]">{item.filename}</span>
+        <span className="flex items-center gap-[6px] font-cn text-[10px] text-[var(--color-ink-3)]">
+          <span className="uppercase">{item.mime.split('/')[1] ?? copy.detail.unknown}</span>
+          <span>·</span>
+          <span>{item.bytesLabel}</span>
+          {item.referenceCount > 0 ? (
+            <>
+              <span>·</span>
+              <span>被引用 {item.referenceCount}</span>
+            </>
+          ) : null}
+        </span>
+      </button>
+    </div>
   )
 }
 
 function FileRow({
   item,
   active,
+  checked,
+  onToggle,
   onSelect,
 }: {
   item: MediaItem
   active: boolean
+  checked: boolean
+  onToggle: (on: boolean) => void
   onSelect: () => void
 }) {
   return (
-    <button
-      type="button"
-      onClick={onSelect}
-      aria-pressed={active}
+    <div
       data-media-id={item.id}
       className={[
-        'flex items-center gap-[12px] rounded-[10px] px-[10px] py-[8px] text-left transition-colors',
-        active ? 'bg-[var(--color-primary-soft)]' : 'hover:bg-[var(--admin-soft)]',
+        'flex items-center gap-[12px] rounded-[10px] px-[10px] py-[8px] transition-colors',
+        checked
+          ? 'bg-[var(--color-primary-soft)]'
+          : active
+            ? 'bg-[var(--color-primary-soft)]/45'
+            : 'hover:bg-[var(--admin-soft)]',
       ].join(' ')}
     >
-      <Thumb item={item} className="h-[38px] w-[52px] shrink-0 rounded-[6px]" />
-      <span className="min-w-0 flex-1 truncate font-latin text-[12px] text-[var(--color-ink)]">
-        {item.filename}
-      </span>
-      <span className="shrink-0 font-cn text-[11px] text-[var(--color-ink-3)]">{item.bytesLabel}</span>
-      <span className="w-[64px] shrink-0 text-right font-cn text-[11px] text-[var(--color-ink-3)]">
-        {item.referenceCount > 0 ? `引用 ${item.referenceCount}` : copy.detail.unknown}
-      </span>
-    </button>
+      <Checkbox
+        checked={checked}
+        onChange={onToggle}
+        label={copy.bulk.selectRow.replace('{name}', item.filename)}
+      />
+      <button
+        type="button"
+        onClick={onSelect}
+        aria-pressed={active}
+        className="flex min-w-0 flex-1 items-center gap-[12px] text-left"
+      >
+        <Thumb item={item} className="h-[38px] w-[52px] shrink-0 rounded-[6px]" />
+        <span className="min-w-0 flex-1 truncate font-latin text-[12px] text-[var(--color-ink)]">
+          {item.filename}
+        </span>
+        <span className="shrink-0 font-cn text-[11px] text-[var(--color-ink-3)]">{item.bytesLabel}</span>
+        <span className="w-[64px] shrink-0 text-right font-cn text-[11px] text-[var(--color-ink-3)]">
+          {item.referenceCount > 0 ? `引用 ${item.referenceCount}` : copy.detail.unknown}
+        </span>
+      </button>
+    </div>
   )
 }
 
@@ -721,6 +994,8 @@ function DetailPanel({
   altLimit,
   saving,
   loading,
+  originLabel,
+  originHint,
   onChangeAlt,
   onSave,
   onCopy,
@@ -734,6 +1009,10 @@ function DetailPanel({
   altLimit: number
   saving: boolean
   loading: boolean
+  /** 来源档的中文名，来自服务端下发的 `policy.origins` */
+  originLabel: string
+  /** 非空表示这一档删不掉 —— 它就是理由，直接上屏，界面不自己编一句话 */
+  originHint: string
   onChangeAlt: (value: string) => void
   onSave: () => void
   onCopy: () => void
@@ -824,6 +1103,7 @@ function DetailPanel({
             </Field>
 
             <div className="flex flex-col gap-[9px] rounded-[12px] bg-[var(--admin-soft)] px-[14px] py-[14px]">
+              <MetaRow label={copy.origin.field} value={originLabel || copy.detail.unknown} />
               <MetaRow
                 label={copy.detail.meta.size}
                 value={
@@ -836,6 +1116,19 @@ function DetailPanel({
               <MetaRow label={copy.detail.meta.format} value={item.mime || copy.detail.unknown} />
               <MetaRow label={copy.detail.meta.uploaded} value={formatWhen(item.createdAt)} />
             </div>
+
+            {/* 删不掉的那一档：把理由摆在删除按钮的同一屏里，而不是让人点一下
+                再收到一条 409。这句话不是前端写的 —— 它来自服务端下发的来源策略 */}
+            {originHint ? (
+              <div className="flex flex-col gap-[6px] rounded-[12px] border border-[#f0e0c8] bg-[#fdf8ef] px-[14px] py-[12px]">
+                <span className="font-cn text-[11.5px] font-medium text-[#a8611a]">
+                  {copy.remove.blockedTitle}
+                </span>
+                <span className="font-cn text-[11px] leading-[1.7] text-[#a8611a] opacity-85">
+                  {originHint}
+                </span>
+              </div>
+            ) : null}
 
             <div className="flex flex-col gap-[8px] rounded-[12px] bg-[var(--admin-soft)] px-[14px] py-[14px]">
               <div className="flex items-center justify-between gap-[10px]">
@@ -879,6 +1172,8 @@ function DetailPanel({
               variant="danger"
               size="sm"
               icon={<TrashIcon className="h-[13px] w-[13px]" />}
+              disabled={Boolean(originHint)}
+              title={originHint || undefined}
               onClick={onRemove}
             >
               {copy.remove.action}

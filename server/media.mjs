@@ -12,6 +12,10 @@
  * 3. **落盘路径只从两个根长出来。** `url` 是库里的字符串，谁写进去的都有可能；
  *    拿它直接做 `readFileSync` 的入参等于把「写库」升级成了「读任意文件」。
  *    所以只认 `/uploads/` 与 `/images/` 两个前缀，其余一律当作没有磁盘副本。
+ * 4. **能不能删文件，取决于这条记录是从哪来的。** 上传件在持久卷上，删了就是真没了；
+ *    随构建发布的素材本体在版本库里，运行期 unlink 只会在下次构建时被拷回来。
+ *    所以「可删」是一条由来源决定的策略（`MEDIA_ORIGINS`），删除前先问它 ——
+ *    单条删除与批量删除走的是同一个判定，不会出现「单条拦下、批量放过」。
  */
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -19,18 +23,21 @@ import { basename, join, resolve } from 'node:path'
 import { all, distDir, get, nowIso, projectRoot, run } from './db.mjs'
 import { readSettings } from './settings.mjs'
 import { SECTION_SPECS } from '../shared/sections.mjs'
-import { MAX_ALT_LENGTH, MAX_UPLOAD_BYTES, UPLOAD_ACCEPT, UPLOAD_HINT, UPLOAD_TYPES, formatBytes, mediaKindOf } from '../shared/media.mjs'
+import { MAX_ALT_LENGTH, MAX_UPLOAD_BYTES, MEDIA_ORIGINS, UPLOAD_ACCEPT, UPLOAD_HINT, UPLOAD_TYPES, formatBytes, mediaKindOf } from '../shared/media.mjs'
 
 /**
  * 界面需要照着它做事的那几条策略，随列表一起下发。
  * 前端各存一份的后果是「界面上写着能传，实际被拒」—— 所以上传白名单、
  * 体积上限、替代文本上限只有这一处声明，两个界面都读它。
+ * `origins` 同理，只是它约束的是**删除**：哪一档删得掉、删不掉时说什么话，
+ * 界面与拒收读的是同一份。
  */
 export const MEDIA_POLICY = {
   accept: UPLOAD_ACCEPT,
   hint: UPLOAD_HINT,
   maxBytes: MAX_UPLOAD_BYTES,
   maxAlt: MAX_ALT_LENGTH,
+  origins: MEDIA_ORIGINS,
 }
 
 export const UPLOAD_DIR = process.env.UPLOAD_DIR ?? resolve(projectRoot, 'data/uploads')
@@ -53,6 +60,14 @@ export function diskPathOf(url) {
   if (u.startsWith(`${UPLOAD_URL_PREFIX}/`)) return join(UPLOAD_DIR, basename(u))
   if (u.startsWith(PUBLIC_IMAGE_PREFIX)) return join(distDir, 'images', basename(u))
   return null
+}
+
+/** `url` 属于哪一档来源（见 `shared/media.mjs` 的 `MEDIA_ORIGINS`）。 */
+export function originOf(url) {
+  const u = String(url ?? '')
+  if (u.startsWith(`${UPLOAD_URL_PREFIX}/`)) return 'upload'
+  if (u.startsWith(PUBLIC_IMAGE_PREFIX)) return 'build'
+  return 'other'
 }
 
 /** 真实字节数。读不到磁盘时退回库里那一列（可能也是 0，但那是当时的事实）。 */
@@ -178,6 +193,27 @@ export function referenceIndex() {
 
 export const referencesOf = (row) => referenceIndex()(row.url)
 
+// ------------------------------------------------------------------ 删除判定
+
+/**
+ * 这一条**能不能删**，不能删时说清为什么。返回 null 表示可以删。
+ *
+ * 做成一个共用函数而不是在两条删除路径里各写一遍，是因为它同时约束三件事：
+ * 单条删除的 409、批量删除里的跳过清单、界面上的禁用状态。这三处只要有一处
+ * 口径不同，就会出现「界面上删得动、接口拒收」或者反过来「界面上拦着、批量能绕过去」。
+ *
+ * 两条拒绝理由的**顺序**是有意的：先看来源，再看引用。删不掉的素材（随构建发布）
+ * 无论被引用几次都删不掉，先报引用数会让人以为「把那几处引用清掉就能删了」。
+ */
+export function mediaDeleteBlock(row, refs) {
+  const origin = MEDIA_ORIGINS[originOf(row.url)]
+  if (!origin.removable) return `「${row.filename}」${origin.hint ?? '不可删除'}`
+  if (refs.length) {
+    return `「${row.filename}」正被 ${refs.length} 处引用，删掉会让它们显示裂图`
+  }
+  return null
+}
+
 // ------------------------------------------------------------------ 读
 
 const MEDIA_SORTS = {
@@ -206,6 +242,8 @@ function asMediaItem(row, lookup) {
     url: row.url,
     mime: row.mime,
     kind,
+    /** 来源决定「删得掉吗」。界面上的徽标与删除按钮的禁用状态都读它 */
+    origin: originOf(row.url),
     bytes,
     bytesLabel: formatBytes(bytes),
     width: size?.width ?? row.width ?? null,
@@ -349,15 +387,25 @@ export function saveUpload({ buffer, originalName, mime }) {
   return { row: mediaItemOf(get('SELECT * FROM media WHERE id = ?', Number(info.lastInsertRowid))) }
 }
 
-/** 只删自己传的。`public/images` 是随构建产物一起发布的源文件，不在运行时可删范围里。 */
+/**
+ * 删磁盘上的副本。只删自己传的（`data/uploads`）；随构建发布的素材不在可删范围里，
+ * 理由见 `MEDIA_ORIGINS.build`。`other` 档本来就没有磁盘副本，无事可做。
+ *
+ * 文件已经不在了也算成功：这一层的目标是「删完之后库与磁盘一致」，
+ * 而那种情况下它已经一致了。报一句「文件没能删掉，请手动清理」只会让人
+ * 去找一个本来就不存在的文件。
+ */
 export function removeMediaFile(row) {
-  const u = String(row.url ?? '')
-  if (!u.startsWith(`${UPLOAD_URL_PREFIX}/`)) return false
-  const path = diskPathOf(u)
+  const origin = originOf(row.url)
+  /* `other` 档本来就没有磁盘副本，删完即一致。`build` 档走到这里说明调用方漏了
+     那道来源判定 —— 返回 false 让界面上照实报「文件没删掉」，而不是假装成功。 */
+  if (origin === 'other') return true
+  if (origin === 'build') return false
+  const path = diskPathOf(row.url)
   try {
     unlinkSync(path)
     return true
-  } catch {
-    return false
+  } catch (err) {
+    return err?.code === 'ENOENT'
   }
 }

@@ -62,14 +62,26 @@ const renderers = {
   post_status: ({ detail }) => renderPostStatus(detail),
   post_delete: ({ detail }) => renderPostDelete(detail),
   post_save: suffixed('保存文章'),
+  /*
+   * 批量动作与单条动作**分开记**：日志里翻到一条 post_bulk，就知道这一秒动了多篇，
+   * 而不必去数一串同秒出现的单条记录。
+   *
+   * 名词刻意保持**宽**（「批量操作 X」而不是「批量删除 X」）：一个动作码对应一批
+   * 语义相近的动作（发布 / 转草稿 / 回收 / 删除），具体做了什么写在 detail 里。
+   * 若为每个动作各开一个码，日志页的动作筛选条会长成一整排几乎同名的选项，
+   * 而翻日志的人真正想问的是「哪一次动了很多篇」，不是「那一次具体按了哪个钮」。
+   */
+  post_bulk: suffixed('批量操作文章'),
   project_create: suffixed('新建项目'),
   project_update: suffixed('更新项目'),
   project_delete: suffixed('删除项目'),
+  project_bulk: suffixed('批量操作项目'),
   /* 拖拽排序一次性改动整份顺序，所以单独一个码：日志里翻到它就知道是顺序被动过 */
   project_reorder: suffixed('调整项目顺序'),
   media_upload: suffixed('上传媒体'),
   media_update: suffixed('修改媒体信息'),
   media_delete: suffixed('删除媒体'),
+  media_bulk: suffixed('批量删除媒体'),
   resume_save: suffixed('更新简历'),
 
   // ---- 站点配置

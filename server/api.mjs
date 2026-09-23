@@ -61,9 +61,12 @@ import { describeSectionChange, readSectionsAdmin, validateSection, writeSection
 import {
   MEDIA_POLICY,
   MEDIA_SORT_OPTIONS,
+  mediaDeleteBlock,
   mediaFacets,
   mediaItemOf,
+  originOf,
   readMediaAdmin,
+  referenceIndex,
   referencesOf,
   removeMediaFile,
   saveUpload,
@@ -868,13 +871,21 @@ function postStatusCounts() {
   }
 }
 
-api.get('/admin/posts', requireAuth, (req, res) => {
-  const statusRaw = String(req.query.status ?? 'all')
+/**
+ * 文章的筛选条件 → `WHERE` 片段与参数。
+ *
+ * 列表接口与「按当前筛选全选」的批量接口共用这一份。它不是为了少写几行才抽出来的：
+ * 全选处理的目标集合，必须与列表**当时显示的那一个**相同，否则会出现
+ * 「选了 12 篇、只动了 10 篇」这种无从解释的结果。共用一份筛选，等于让这个不变量
+ * 由程序结构保证，而不是靠两处代码写得像。
+ *
+ * 未知状态的归一化也一并在这里做（认不出的归类到 `all`）：一处错两边一起错，
+ * 比两边各 subtle 地错一半更容易暴露。
+ */
+function postScope(query) {
+  const statusRaw = String(query?.status ?? 'all')
   const status = ['all', ...POST_STATUSES].includes(statusRaw) ? statusRaw : 'all'
-  const sortRaw = String(req.query.sort ?? 'updated')
-  const sort = Object.hasOwn(POST_SORTS, sortRaw) ? sortRaw : 'updated'
-  const category = String(req.query.category ?? 'all')
-  const perPage = Math.min(Math.max(Number.parseInt(req.query.perPage ?? '8', 10) || 8, 1), 50)
+  const category = String(query?.category ?? 'all')
 
   const where = []
   const params = []
@@ -886,7 +897,14 @@ api.get('/admin/posts', requireAuth, (req, res) => {
     where.push('category = ?')
     params.push(category)
   }
-  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+  return { whereSql: where.length ? `WHERE ${where.join(' AND ')}` : '', params, status, category }
+}
+
+api.get('/admin/posts', requireAuth, (req, res) => {
+  const { whereSql, params } = postScope(req.query)
+  const sortRaw = String(req.query.sort ?? 'updated')
+  const sort = Object.hasOwn(POST_SORTS, sortRaw) ? sortRaw : 'updated'
+  const perPage = Math.min(Math.max(Number.parseInt(req.query.perPage ?? '8', 10) || 8, 1), 50)
 
   const total = get(`SELECT COUNT(*) AS n FROM posts ${whereSql}`, ...params)?.n ?? 0
   const totalPages = Math.max(Math.ceil(total / perPage), 1)
@@ -1511,6 +1529,204 @@ api.delete('/admin/posts/:id', requireAuth, (req, res) => {
   res.json({ deleted: true, id, counts: postStatusCounts() })
 })
 
+// --------------------------------------------------------- 批量操作（三屏共用）
+
+/*
+ * 批量操作有三个屏要用（文章 / 项目 / 媒体库），所以契约只有一套：`{ ids, action }`。
+ *
+ * 为什么三屏共用一个形状，而不是各写各的：批量动作里有「不可逆」的那几个（彻底删除、
+ * 删除媒体），它们的准入判定、跳过后的回执、审计里那句话，三处只要有一处长得不一样，
+ * 使用者就得重新学一遍「这一屏选完之后会发生什么」。形状统一之后前端也只需要一个
+ * helper，不会出现「文章屏的确认弹层说了跳过，项目屏悄悄地全删了」。
+ *
+ * `affected` 与 `skipped` 的语义是**逐条**的，不做「全有或全无」：一次选中 20 条里
+ * 混进 1 条不符合条件的，没有理由把那 19 条也一起卡住。代价通过 `skipped`
+ * 原样回带（每条都带理由），前端在动手**之前**就用同一份数据摆出了清单 ——
+ * 所以这不是事后告知，而是同一份账的两次呈现。
+ */
+const BULK_MAX = 200
+
+/**
+ * 「按筛选全选」的上限，单独一道，比 `BULK_MAX` 宽。
+ *
+ * 它不是 `BULK_MAX` 的替代品：那个限制的是「一次请求携带多少 id」，
+ * 这个限制的是「后台一个按钮能带动多少条数据」。前者是请求体体积问题，
+ * 后者是误操作半径问题 —— 全选最容易发生在人不在意的那一刻，所以它要有自己的闸。
+ */
+const BULK_FILTER_MAX = 500
+
+/**
+ * 读出一次批量请求的三个部分：动作、选中范围、以及数量快照。
+ *
+ * 选中范围有两种，**互斥**：
+ *   `ids`    —— 显式勾选（当前页勾几个），沿用至今的用法；
+ *   `filter` —— 按当前筛选全选（跨页），服务端用与各列表 route 同一个筛选函数求集合。
+ *
+ * 为什么 filter 模式不让前端先把全部 id 拉下来再传回来 —— 三条理由，任一条都够：
+ *   1. `BULK_MAX` 会在几百条时先把它拦下来，而「全选」本就是为数量多才存在的场景；
+ *   2. 拉 id 与传回之间若有别处写入，前端手上那份列表已经过期，执行时会命中一堆
+ *      它没看到的东西；
+ *   3. 「列表显示什么」与「批量处理什么」若各写一份筛选规则，早晚会长歪，
+ *      届时「全选了 12 篇、只动了 10 篇」将无从解释。
+ */
+function readBulkPayload(body, allowed, resolveFilter) {
+  const src = body && typeof body === 'object' ? body : {}
+  const action = String(src.action ?? '')
+  if (!allowed.includes(action)) {
+    return { error: `这个接口的动作只支持 ${allowed.join(' / ')}` }
+  }
+
+  const explicit = Array.isArray(src.ids) ? src.ids : null
+  const byFilter = src.filter && typeof src.filter === 'object' ? src.filter : null
+
+  // 同时给了没法判断到底要处理哪一批 —— 这个歧义不靠猜：两者都说得通，
+  // 而「批量 × 猜错了范围」是这里最贵的组合，直接要求调用方说清楚。
+  if (explicit && byFilter) return { error: 'ids 与 filter 只能给一个' }
+
+  if (explicit) {
+    if (!explicit.length) return { error: '没有选中任何条目' }
+    if (explicit.length > BULK_MAX) {
+      return { error: `一次最多处理 ${BULK_MAX} 项（收到 ${explicit.length} 项）` }
+    }
+    const ids = explicit.map((v) => Number.parseInt(String(v), 10))
+    if (ids.some((n) => !Number.isInteger(n))) return { error: 'ID 列表里有非法值' }
+    /*
+     * `ids` 去重而不报错：这是「我选了这些」而不是「请按这个顺序处理」，
+     * 重复项没有语义，报错只会让人对着一个看不出差别的列表找哪里重复了。
+     * （`/admin/projects/reorder` 那边相反，那里重复项真的会让顺序错位。）
+     */
+    return { action, scope: 'ids', ids: [...new Set(ids)] }
+  }
+
+  if (byFilter) {
+    const resolved = resolveFilter(byFilter)
+    if (resolved.error) return { error: resolved.error }
+
+    /*
+     * `exclude`：全选之后又手动取消了某几条。
+     * 「选中除了这三条以外的一切」没有别的表达方式 —— 只靠 ids 是做不到的
+     * （ids 是那些没勾的，得先取全集才能减掉，而这正是 filter 模式该干的事）。
+     */
+    const exclude = new Set(
+      (Array.isArray(src.exclude) ? src.exclude : [])
+        .map((v) => Number.parseInt(String(v), 10))
+        .filter((n) => Number.isInteger(n))
+    )
+    const ids = resolved.ids.filter((id) => !exclude.has(id))
+
+    /*
+     * `expected` 是一次**数量快照**：确认弹层上写着「将处理 12 篇」，用户按下去了。
+     *
+     * 但从看到那个数字到请求抵达之间可能已经不是 12 篇了 —— 另一台设备刚发了
+     * 一篇、清理定时器刚删了几条。不一致时**不动手**，返回 409 让他重新看一遍。
+     * 对「彻底删除」这种不可逆的动作，多一次确认的成本远小于删错的成本；
+     * 若静默按新集合执行，等于把一次误操作的半径交给时机决定。
+     */
+    if (Number.isInteger(src.expected) && src.expected !== ids.length) {
+      return {
+        conflict: `列表已经变了：你看到的是 ${src.expected} 项，现在是 ${ids.length} 项，请重新确认`,
+        expected: src.expected,
+        actual: ids.length,
+      }
+    }
+
+    if (!ids.length) return { error: '当前筛选下没有可处理的条目' }
+    if (ids.length > BULK_FILTER_MAX) {
+      return { error: `一次最多处理 ${BULK_FILTER_MAX} 项，请换个筛选条件分批来做（当前 ${ids.length} 项）` }
+    }
+    return { action, scope: 'filter', ids, total: ids.length }
+  }
+
+  return { error: '没有选中任何条目' }
+}
+
+/** 审计与回执里的名字清单：最多列 3 个，其余折成「等 N 个」。一行日志不该被 200 个标题撑爆。 */
+function nameSummary(names, format = (n) => `《${n}》`) {
+  const shown = names.slice(0, 3).map(format).join(' ')
+  return names.length > 3 ? `${shown} 等 ${names.length} 个` : shown
+}
+
+/** 日志里的动词。动作码只有一个（`post_bulk`），具体做了什么由这里区分。 */
+const POST_BULK_LABELS = {
+  publish: '发布',
+  unpublish: '转为草稿',
+  trash: '移入回收站',
+  restore: '移出回收站',
+  delete: '彻底删除',
+}
+
+/**
+ * 批量流转文章状态 / 批量彻底删除。
+ *
+ * 五个动作的准入与单条**完全同源**，同源的方式是逐条套用单条那边的同一组条件，
+ * 而不是近似的另一套规则：
+ *   - 状态流转的目标 state 是三选一，所以「已经是它」就算跳过 —— 单条 `PATCH`
+ *     正是 `status !== row.status` 时才写（`restore` 与 `unpublish` 的目标都是
+ *     `draft`，所以它们的跳过理由不同：一个看「在不在回收站」，一个看「是不是草稿」）；
+ *   - 彻底删除只对回收站开放，与 `DELETE /admin/posts/:id` 说的是同一句话。
+ *
+ * `filter` 范围下先一条不多地按筛选取 id（见 `postScope`），再走同一套逐条判定 ——
+ * 「全选」只是扩大候选集，不降低任何一条的准入标准。
+ */
+api.post('/admin/posts/bulk', requireAuth, (req, res) => {
+  const parsed = readBulkPayload(req.body, Object.keys(POST_BULK_LABELS), (filter) => {
+    const { whereSql, params } = postScope(filter)
+    return { ids: all(`SELECT id FROM posts ${whereSql}`, ...params).map((r) => r.id) }
+  })
+  if (parsed.error) return res.status(400).json({ error: parsed.error })
+  if (parsed.conflict) {
+    return res.status(409).json({ error: parsed.conflict, expected: parsed.expected, actual: parsed.actual })
+  }
+  const { action, ids, scope, total } = parsed
+
+  const hit = []
+  const skipped = []
+  for (const id of ids) {
+    const row = get('SELECT id, title, status, published_at FROM posts WHERE id = ?', id)
+    if (!row) {
+      skipped.push({ id, label: `#${id}`, reason: '文章不存在' })
+      continue
+    }
+    let reason = null
+    if (action === 'publish') reason = row.status === 'published' ? '已经是已发布' : null
+    else if (action === 'unpublish') reason = row.status === 'draft' ? '已经是草稿' : null
+    else if (action === 'trash') reason = row.status === 'trash' ? '已在回收站' : null
+    else if (action === 'restore') reason = row.status !== 'trash' ? '不在回收站里' : null
+    else if (action === 'delete') reason = row.status !== 'trash' ? '不在回收站，请先移入回收站' : null
+
+    if (reason) skipped.push({ id, label: `《${row.title}》`, reason })
+    else hit.push(row)
+  }
+
+  if (hit.length) {
+    const now = nowIso()
+    tx(() => {
+      for (const row of hit) {
+        if (action === 'delete') {
+          run('DELETE FROM posts WHERE id = ?', row.id)
+          continue
+        }
+        const target = action === 'publish' ? 'published' : action === 'trash' ? 'trash' : 'draft'
+        // 首次发布记下发布时间，转回草稿不清空 —— 与单条 PATCH 完全相同的口径
+        const publishedAt = target === 'published' ? (row.published_at ?? now) : row.published_at
+        run('UPDATE posts SET status = ?, published_at = ?, updated_at = ? WHERE id = ?', target, publishedAt, now, row.id)
+      }
+    })
+    writeAudit({
+      userId: req.user.id,
+      actor: req.user.email,
+      action: 'post_bulk',
+      targetType: 'post',
+      detail: `${POST_BULK_LABELS[action]} ${hit.length} 篇${
+        skipped.length ? `（跳过 ${skipped.length} 篇）` : ''
+      }${scope === 'filter' ? ' · 按当前筛选全选' : ''}：${nameSummary(hit.map((r) => r.title))}`,
+      req,
+    })
+  }
+
+  res.json({ action, scope, affected: hit.length, skipped, total: total ?? null, counts: postStatusCounts() })
+})
+
 // --------------------------------------------------- 内容：项目（卡片墙：增删改与排序）
 
 /** 项目只有「在架上 / 下架」两态。它不像文章那样有回收站页签，所以不引入 trash。 */
@@ -1579,16 +1795,33 @@ const PROJECT_SORTS = {
   updated: 'updated_at DESC, id DESC',
 }
 
+/**
+ * 项目的筛选条件。与 `postScope` 同义、同用途：列表 route 与批量 route 共用一份，
+ * 保证「屏幕上显示几条」与「全选会处理几条」永远是同一个集合。
+ *
+ * 项目目前只有一个维度（语言），抽出来看起来有点过度 —— 但正因为只有一个，
+ * 以后加第二个时最容易就地顺手另一个写法，那时它就不只是一行了。
+ */
+function projectScope(query) {
+  return { language: String(query?.language ?? '').trim() }
+}
+
+/** 筛选 → SQL 片段。不给语言就是不筛选，不去拼 `WHERE 1=1` 那样的占位条件。 */
+function projectSql(scope) {
+  return scope.language
+    ? { whereSql: 'WHERE language = ?', params: [scope.language] }
+    : { whereSql: '', params: [] }
+}
+
 api.get('/admin/projects', requireAuth, (req, res) => {
-  const language = String(req.query.language ?? '').trim()
+  const scope = projectScope(req.query)
+  const { whereSql, params } = projectSql(scope)
   const sort = String(req.query.sort ?? 'order')
   const orderBy = PROJECT_SORTS[sort] ?? PROJECT_SORTS.order
 
-  const rows = language
-    ? all(`SELECT * FROM projects WHERE language = ? ORDER BY ${orderBy}`, language)
-    : all(`SELECT * FROM projects ORDER BY ${orderBy}`)
+  const rows = all(`SELECT * FROM projects ${whereSql} ORDER BY ${orderBy}`, ...params)
 
-  res.json({ items: rows.map(asProjectItem), sort, language, ...projectFacets() })
+  res.json({ items: rows.map(asProjectItem), sort, language: scope.language, ...projectFacets() })
 })
 
 /** 可写字段 → 列名。落库走这张表，请求里多传的键一律丢弃。 */
@@ -1789,6 +2022,100 @@ api.delete('/admin/projects/:id', requireAuth, (req, res) => {
     req,
   })
   res.json({ deleted: true, id, ...projectFacets() })
+})
+
+/**
+ * 批量删除项目。项目这一屏最小集只有删除一个动作，但仍然保留 `action` 字段 ——
+ * 契约形状与文章、媒体库一致，前端共用一个 helper（见「批量操作（三屏共用）」）。
+ *
+ * 与单条删除同源：项目没有引用关系，删就是删，不做「被首页精选引用」之类的额外拦截 ——
+ * 那会在单条与批量之间长出第二套规矩。
+ */
+/** 日志里的动词。项目没有回收站，`delete` 之外四个都是翻转一个开关。 */
+const PROJECT_BULK_LABELS = {
+  publish: '发布',
+  unpublish: '转为草稿',
+  feature: '设为精选',
+  unfeature: '取消精选',
+  delete: '删除',
+}
+
+/**
+ * 批量改项目状态 / 批量删除。
+ *
+ * 判定同样是逐条的、**与单条同源**：目标值已经是当前值时跳过。
+ * 这与单条 `PATCH` 的写法一致 —— 那边也是逐字段比对后才记 `changed`，
+ * 「没变的东西不值得一条日志」。
+ *
+ * `featured` 与 `status` 是两个独立开关，各有各的跳过理由，互不干涉。
+ * 一次把二十个项目全部设为精选是**允许**的：首页虽然只展示前三个，
+ * 但「精选该有几个」是内容判断，接口不替使用者做这个决定 ——
+ * 它只保证「已经是精选的不会被重复设一次」。
+ */
+api.post('/admin/projects/bulk', requireAuth, (req, res) => {
+  const parsed = readBulkPayload(req.body, Object.keys(PROJECT_BULK_LABELS), (filter) => {
+    const { whereSql, params } = projectSql(projectScope(filter))
+    return { ids: all(`SELECT id FROM projects ${whereSql}`, ...params).map((r) => r.id) }
+  })
+  if (parsed.error) return res.status(400).json({ error: parsed.error })
+  if (parsed.conflict) {
+    return res.status(409).json({ error: parsed.conflict, expected: parsed.expected, actual: parsed.actual })
+  }
+  const { action, ids, scope, total } = parsed
+
+  const hit = []
+  const skipped = []
+  for (const id of ids) {
+    const row = get('SELECT id, title, status, featured FROM projects WHERE id = ?', id)
+    if (!row) {
+      skipped.push({ id, label: `#${id}`, reason: '项目不存在' })
+      continue
+    }
+    let reason = null
+    if (action === 'publish') reason = row.status === 'published' ? '已经是已发布' : null
+    else if (action === 'unpublish') reason = row.status === 'draft' ? '已经是草稿' : null
+    else if (action === 'feature') reason = row.featured ? '已经是精选' : null
+    else if (action === 'unfeature') reason = !row.featured ? '不是精选' : null
+
+    if (reason) skipped.push({ id, label: `《${row.title}》`, reason })
+    else hit.push(row)
+  }
+
+  if (hit.length) {
+    const now = nowIso()
+    const sets =
+      action === 'publish'
+        ? ["status = 'published'"]
+        : action === 'unpublish'
+          ? ["status = 'draft'"]
+          : action === 'feature'
+            ? ['featured = 1']
+            : action === 'unfeature'
+              ? ['featured = 0']
+              : null
+
+    tx(() => {
+      for (const row of hit) {
+        if (action === 'delete') {
+          run('DELETE FROM projects WHERE id = ?', row.id)
+        } else {
+          run(`UPDATE projects SET ${sets[0]}, updated_at = ? WHERE id = ?`, now, row.id)
+        }
+      }
+    })
+    writeAudit({
+      userId: req.user.id,
+      actor: req.user.email,
+      action: 'project_bulk',
+      targetType: 'project',
+      detail: `${PROJECT_BULK_LABELS[action]} ${hit.length} 个项目${
+        skipped.length ? `（跳过 ${skipped.length} 个）` : ''
+      }${scope === 'filter' ? ' · 按当前筛选全选' : ''}：${nameSummary(hit.map((r) => r.title))}`,
+      req,
+    })
+  }
+
+  res.json({ action, scope, affected: hit.length, skipped, total: total ?? null, ...projectFacets() })
 })
 
 /**
@@ -2013,9 +2340,15 @@ api.patch('/admin/media/:id', requireAuth, (req, res) => {
 /**
  * 删除。
  *
- * **被引用时默认拒删**，并把引用清单原样返回 —— 前端据此能说清「删了会影响哪几篇」。
- * 想删得传 `?force=1`：这是管理员在看清代价之后的第二次确认，不是一条捷径。
- * 不加这个门，删一张首页配图会静默把首页变成裂图，而日志里只有一行「删除媒体」。
+ * 两道门，性质不同，处理方式刻意不一样：
+ *
+ * 1. **来源门**：随构建产物发布的素材不可删（`public/images` 在版本库里，
+ *    运行期 unlink 会在下次构建时被拷回来）。这道门**不能绕** —— 它拦的不是
+ *    「代价大」，而是「这件事不成立」，`force` 只会让一句假话变成一次真操作。
+ * 2. **引用门**：被引用时默认拒删，并把引用清单原样返回，`force=1` 才放行 ——
+ *    这是管理员在看清代价之后的第二次确认，不是一条捷径。
+ *
+ * 不加这道门，删一张首页配图会静默把首页变成裂图，而日志里只有一行「删除媒体」。
  */
 api.delete('/admin/media/:id', requireAuth, (req, res) => {
   const id = Number.parseInt(req.params.id, 10)
@@ -2025,20 +2358,25 @@ api.delete('/admin/media/:id', requireAuth, (req, res) => {
   if (!row) return res.status(404).json({ error: '媒体不存在' })
 
   const refs = referencesOf(row)
+  const origin = originOf(row.url)
   const forced = String(req.query.force ?? '') === '1'
-  if (refs.length && !forced) {
+  const blockedByOrigin = !MEDIA_POLICY.origins[origin].removable
+
+  if (blockedByOrigin || (refs.length && !forced)) {
     writeAudit({
       userId: req.user.id,
       actor: req.user.email,
       action: 'media_delete',
       targetType: 'media',
       targetId: String(id),
-      detail: `${row.filename} · 被 ${refs.length} 处引用，已拦下`,
+      detail: `${row.filename} · ${
+        blockedByOrigin ? `来源为「${MEDIA_POLICY.origins[origin].label}」` : `被 ${refs.length} 处引用`
+      }，已拦下`,
       result: 'failed',
       req,
     })
     return res.status(409).json({
-      error: `「${row.filename}」正被 ${refs.length} 处引用，删掉会让它们显示裂图`,
+      error: blockedByOrigin ? mediaDeleteBlock(row, []) : mediaDeleteBlock(row, refs),
       references: refs,
     })
   }
@@ -2052,11 +2390,97 @@ api.delete('/admin/media/:id', requireAuth, (req, res) => {
     action: 'media_delete',
     targetType: 'media',
     targetId: String(id),
-    detail: `${row.filename}${refs.length ? ` · 连同 ${refs.length} 处引用一并删除` : ''}`,
+    detail: `${row.filename}${fileRemoved ? '（含磁盘文件）' : '（磁盘上没有文件）'}${
+      refs.length ? ` · 连同 ${refs.length} 处引用一并删除` : ''
+    }`,
     req,
   })
 
-  res.json({ deleted: true, id, fileRemoved, removedReferences: refs.length, ...mediaFacets() })
+  res.json({ deleted: true, id, fileRemoved, origin, removedReferences: refs.length, ...mediaFacets() })
+})
+
+/**
+ * 批量删除。
+ *
+ * 逐条过同一道 `mediaDeleteBlock`，能删的删（连磁盘文件一起），不能删的进 `skipped`
+ * 并带上理由原样返回。不做「全有或全无」：选中 12 张里混进一张随构建发布的素材，
+ * 没有理由让另外 11 张也删不掉。
+ *
+ * 引用扫描**整批只做一次**（`referenceIndex()` 返回一个查表函数）：逐条各扫一遍
+ * 就是 N 次全表读，而选中 12 张、库里 200 篇正文的规模下，这笔账不小。
+ *
+ * 批量删除**不提供 force**：详情面板那条路保留逐张确认的摩擦是有意的，
+ * 而一次删多张被引用的图，风险不是「多按一次确认」能盖住的 —— 所以这里直接把
+ * 被引用的项摆进 `skipped`，要删就去详情面板一张一张删。
+ */
+api.post('/admin/media/bulk', requireAuth, (req, res) => {
+  /*
+   * filter 范围只认分组：媒体库的筛选条就只有分组这一个维度，
+   * 所以「筛选」在这里等同于「某个分组的全部文件」。
+   * 校验放在 `readMediaAdmin` 之前、复用列表那条同一个 `MEDIA_KINDS` 名单 ——
+   * 「列表能显示出来的分组名」与「全选能用哪个分组」必须是同一份。
+   */
+  const parsed = readBulkPayload(req.body, ['delete'], (filter) => {
+    const kind = String(filter.kind ?? '').trim()
+    if (kind && !MEDIA_KINDS.some((k) => k.key === kind)) {
+      return { error: `未知的媒体分组「${kind}」` }
+    }
+    // sort 不改变集合，所以取 id 时不必带上它
+    return { ids: readMediaAdmin({ kind, sort: 'recent' }).items.map((i) => i.id) }
+  })
+  if (parsed.error) return res.status(400).json({ error: parsed.error })
+  if (parsed.conflict) {
+    return res.status(409).json({ error: parsed.conflict, expected: parsed.expected, actual: parsed.actual })
+  }
+  const { ids, scope, total } = parsed
+
+  const lookup = referenceIndex()
+  const hit = []
+  const skipped = []
+  for (const id of ids) {
+    const row = get('SELECT * FROM media WHERE id = ?', id)
+    if (!row) {
+      skipped.push({ id, label: `#${id}`, reason: '媒体不存在' })
+      continue
+    }
+    const reason = mediaDeleteBlock(row, lookup(row.url))
+    if (reason) skipped.push({ id, label: row.filename, reason })
+    else hit.push(row)
+  }
+
+  let fileRemoved = 0
+  if (hit.length) {
+    tx(() => {
+      for (const row of hit) {
+        if (removeMediaFile(row)) fileRemoved += 1
+        run('DELETE FROM media WHERE id = ?', row.id)
+      }
+    })
+    writeAudit({
+      userId: req.user.id,
+      actor: req.user.email,
+      action: 'media_bulk',
+      targetType: 'media',
+      detail: `${hit.length} 个文件${fileRemoved < hit.length ? `（磁盘上删掉 ${fileRemoved} 个）` : '（含磁盘文件）'}${
+        skipped.length ? ` · 跳过 ${skipped.length} 个` : ''
+      }${scope === 'filter' ? ' · 按当前分组全选' : ''}：${nameSummary(
+        hit.map((r) => r.filename),
+        (n) => n
+      )}`,
+      req,
+    })
+  }
+
+  res.json({
+    action: 'delete',
+    scope,
+    affected: hit.length,
+    skipped,
+    fileRemoved,
+    removedReferences: 0,
+    total: total ?? null,
+    ...mediaFacets(),
+  })
 })
 
 // ------------------------------------------------------------------- 仪表盘
