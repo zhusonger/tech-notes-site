@@ -8,8 +8,8 @@
  * 三处刻意的取舍：
  *
  * 1. **拖拽只在「未筛选 + 按排序权重」时可用。** 筛选状态下前端只看得到一部分项目，
- *    它无从知道那些没显示的项目该落在哪里；按 Stars 排序时拖拽更是无意义 ——
- *    顺序由数值决定，拖了也会被重排回去。与其拖完发现顺序没变，不如事先把把手关掉，
+ *    它无从知道那些没显示的项目该落在哪里；按更新时间排序时拖拽同样无意义 ——
+ *    顺序由时间决定，拖了也会被重排回去。与其拖完发现顺序没变，不如事先把把手关掉，
  *    并且**说明为什么关掉**（悬停提示）。
  *
  * 2. **排序提交的是整份 id 列表，不是「把 A 移到 B 前面」。** 后者要求服务端复现
@@ -82,7 +82,7 @@ const LANGUAGE_OTHER = '__other__'
 const LANGUAGE_DOT = '#c4bdb4'
 
 /** 服务端返回的排序口径是闭集，这里再收一次，防止 URL 上被塞进别的值。 */
-const SORT_KEYS: ProjectSortKey[] = ['order', 'stars', 'updated']
+const SORT_KEYS: ProjectSortKey[] = ['order', 'updated']
 
 /** 批量动作按钮的图标，与行菜单里同名动作用同一枚 —— 同名不同图会很别扭。 */
 const BULK_ICON: Record<ProjectBulkAction, (props: { className?: string }) => ReactNode> = {
@@ -101,8 +101,6 @@ interface ProjectForm {
   /** 现有语言之一，或 `LANGUAGE_OTHER`（此时用 `languageNew`），或空串（未指定） */
   languageChoice: string
   languageNew: string
-  stars: string
-  forks: string
   repoUrl: string
   featured: boolean
   status: ProjectStatus
@@ -115,8 +113,6 @@ const emptyForm = (): ProjectForm => ({
   tags: '',
   languageChoice: '',
   languageNew: '',
-  stars: '0',
-  forks: '0',
   repoUrl: '',
   featured: false,
   status: 'published',
@@ -129,19 +125,10 @@ const formFrom = (p: ProjectItem): ProjectForm => ({
   tags: p.tags,
   languageChoice: p.language,
   languageNew: '',
-  stars: String(p.stars),
-  forks: String(p.forks),
   repoUrl: p.repoUrl,
   featured: p.featured,
   status: p.status,
 })
-
-/** 只用于展示的 stars 计数，与前台同一口径（`1.8k` 那种）。 */
-function starsLabel(n: number): string {
-  if (n < 1000) return String(n)
-  const k = n / 1000
-  return `${k >= 10 ? Math.round(k) : Math.round(k * 10) / 10}k`
-}
 
 export default function AdminProjects() {
   const [search, setSearch] = useSearchParams()
@@ -461,7 +448,6 @@ export default function AdminProjects() {
   const subtitle = copy.subtitle
     .replace('{all}', String(data?.counts.all ?? 0))
     .replace('{featured}', String(data?.counts.featured ?? 0))
-    .replace('{stars}', data?.counts.starsLabel ?? '0')
     .replace('{reorder}', canReorder ? copy.reorderOn : copy.reorderOff)
 
   return (
@@ -489,7 +475,6 @@ export default function AdminProjects() {
             onChange={(v) => setSort((SORT_KEYS as string[]).includes(v) ? (v as ProjectSortKey) : 'order')}
             options={[
               { value: 'order', label: copy.sortOptions.order },
-              { value: 'stars', label: copy.sortOptions.stars },
               { value: 'updated', label: copy.sortOptions.updated },
             ]}
             ariaLabel={copy.filter.sort}
@@ -629,7 +614,7 @@ export default function AdminProjects() {
               text: (created ? copy.dialog.created : copy.dialog.saved).replace('{title}', project.title),
             })
             closeDialog()
-            /* 改了字段就重取一次：计数（个 / 精选 / stars）与语言筛选条都受影响，
+            /* 改了字段就重取一次：计数（个 / 精选）与语言筛选条都受影响，
                本地拼不如让服务端算 —— 那也是前台将来会看到的数。 */
             void load()
           }}
@@ -797,10 +782,6 @@ function ProjectCard({
 
           {draft ? <Badge tone="muted">{copy.card.draftBadge}</Badge> : null}
 
-          <span className="font-latin text-[11.5px] font-medium leading-none text-[var(--color-ink-2)]">
-            {copy.card.stars.replace('{n}', starsLabel(project.stars))}
-          </span>
-
           {/* 精选徽标只在精选时出现（与画布一致）。
               它同时是个开关，但**只用于取消**：「想上精选」走行菜单，多一步的摩擦是有意的 ——
               首页只有 3 个位置，进精选该是一次明确的选择；而取消精选是撤销，随手一点即可。 */}
@@ -863,8 +844,6 @@ function ProjectDialog({
       description: form.description.trim(),
       tags: form.tags.trim(),
       language,
-      stars: Number.parseInt(form.stars, 10),
-      forks: Number.parseInt(form.forks, 10),
       repoUrl: form.repoUrl.trim(),
       featured: form.featured,
       status: form.status,
@@ -978,27 +957,6 @@ function ProjectDialog({
         <Field label={copy.dialog.tags} hint={copy.dialog.tagsHint}>
           <TextInput value={form.tags} onChange={(e) => set('tags', e.target.value)} placeholder="TypeScript · adb · Pillow" />
         </Field>
-
-        <div className="grid grid-cols-2 gap-[14px]">
-          <Field label={copy.dialog.stars}>
-            <TextInput
-              type="number"
-              min={0}
-              value={form.stars}
-              onChange={(e) => set('stars', e.target.value)}
-              className="font-primary"
-            />
-          </Field>
-          <Field label={copy.dialog.forks}>
-            <TextInput
-              type="number"
-              min={0}
-              value={form.forks}
-              onChange={(e) => set('forks', e.target.value)}
-              className="font-primary"
-            />
-          </Field>
-        </div>
 
         <Field label={copy.dialog.repoUrl} hint={copy.dialog.repoUrlHint}>
           <TextInput

@@ -89,7 +89,7 @@ import {
   taxonomyFacets,
 } from './taxonomy.mjs'
 /* 阅读时长与 stars 计数都由内容派生，服务端与前台必须同一口径 —— 因此复用 shared/ 里的那两个函数 */
-import { countLabel, readingLabel } from '../shared/derive.mjs'
+import { readingLabel } from '../shared/derive.mjs'
 /* 区块的可编辑键与模块归属也来自 shared/：界面上的模块页签与这里的白名单是同一份 */
 import { SECTION_MODULES, getSectionSpec } from '../shared/sections.mjs'
 /* 访客的地区（ip2region 离线库）与设备（UA 规则）都在 server 侧解析，前端只负责渲染结论 */
@@ -1735,9 +1735,6 @@ const PROJECT_STATUSES = ['published', 'draft']
 /** 语言名会出现在筛选条的一行里，太长会把整条推歪。 */
 const LANGUAGE_MAX = 40
 
-/** Stars / Forks 只用于展示，给个上限免得卡片被一串数字撑破。 */
-const REPO_METRIC_MAX = 9999999
-
 function asProjectItem(r) {
   return {
     id: r.id,
@@ -1746,8 +1743,6 @@ function asProjectItem(r) {
     description: r.description,
     tags: r.tags,
     language: r.language,
-    stars: r.stars,
-    forks: r.forks,
     repoUrl: r.repo_url ?? '',
     featured: Boolean(r.featured),
     status: r.status,
@@ -1759,16 +1754,18 @@ function asProjectItem(r) {
 }
 
 /**
- * 副标题上「20 个项目 · 6 个精选 · 累计 6.8k stars」三个数，以及语言筛选条的计数。
+ * 副标题上「8 个项目 · 2 个精选」两个数，以及语言筛选条的计数。
  *
  * 三处都从同一份 `projects` 表现算，所以筛选状态下副标题的数字不会跟着变小 ——
  * 它说的是「一共多少」，不是「筛出来多少」。
+ *
+ * 这里曾经还有第三个「累计 N stars」：那个数来自手填的示意值，没有数据源，
+ * 写出来只是把编的数字摆在管理界面上，所以随 stars / forks 一起去掉了。
  */
 function projectFacets() {
   const totals = get(
     `SELECT COUNT(*) AS total,
-            SUM(CASE WHEN featured = 1 THEN 1 ELSE 0 END) AS featured,
-            COALESCE(SUM(stars), 0) AS stars
+            SUM(CASE WHEN featured = 1 THEN 1 ELSE 0 END) AS featured
      FROM projects`
   )
   const languages = all(
@@ -1776,13 +1773,10 @@ function projectFacets() {
      WHERE language <> '' GROUP BY language ORDER BY n DESC, language`
   ).map((r) => ({ name: r.language, count: r.n }))
 
-  const stars = totals?.stars ?? 0
   return {
     counts: {
       all: totals?.total ?? 0,
       featured: totals?.featured ?? 0,
-      stars,
-      starsLabel: countLabel(stars),
     },
     languages,
   }
@@ -1791,7 +1785,6 @@ function projectFacets() {
 /** 排序口径是闭集，不来自请求原文 —— 拼进 SQL 的是这里选出来的常量。 */
 const PROJECT_SORTS = {
   order: 'sort_order, id',
-  stars: 'stars DESC, sort_order, id',
   updated: 'updated_at DESC, id DESC',
 }
 
@@ -1831,8 +1824,6 @@ const PROJECT_COLUMNS = {
   description: 'description',
   tags: 'tags',
   language: 'language',
-  stars: 'stars',
-  forks: 'forks',
   repoUrl: 'repo_url',
   featured: 'featured',
   status: 'status',
@@ -1845,8 +1836,6 @@ const PROJECT_FIELD_LABELS = {
   description: '简介',
   tags: '技术标签',
   language: '语言',
-  stars: 'Stars',
-  forks: 'Forks',
   repoUrl: '仓库地址',
   featured: '精选',
   status: '状态',
@@ -1877,15 +1866,6 @@ function readProjectPayload(body) {
     const language = str(body.language)
     if (language.length > LANGUAGE_MAX) return { error: `语言名不能超过 ${LANGUAGE_MAX} 字` }
     out.language = language
-  }
-
-  for (const key of ['stars', 'forks']) {
-    if (!(key in body)) continue
-    const raw = body[key]
-    const n = typeof raw === 'number' ? raw : Number.parseInt(String(raw ?? '').trim(), 10)
-    if (!Number.isInteger(n) || n < 0) return { error: `${PROJECT_FIELD_LABELS[key]}需要是非负整数` }
-    if (n > REPO_METRIC_MAX) return { error: `${PROJECT_FIELD_LABELS[key]}超出可展示范围` }
-    out[key] = n
   }
 
   if ('repoUrl' in body) {
@@ -1923,16 +1903,14 @@ api.post('/admin/projects', requireAuth, (req, res) => {
   const tail = get('SELECT COALESCE(MAX(sort_order), -1) AS n FROM projects')?.n ?? -1
 
   const result = run(
-    `INSERT INTO projects (slug, title, description, tags, language, stars, forks, repo_url,
+    `INSERT INTO projects (slug, title, description, tags, language, repo_url,
                            featured, status, sort_order, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     slug,
     v.title,
     v.description ?? '',
     v.tags ?? '',
     v.language ?? '',
-    v.stars ?? 0,
-    v.forks ?? 0,
     v.repoUrl ?? null,
     v.featured ?? 0,
     v.status ?? 'published',

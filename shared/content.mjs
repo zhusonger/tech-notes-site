@@ -9,13 +9,15 @@
  *   2. `check:routes` 断言的是「兜底内容能正确渲染」，而冒烟测试断言的是
  *      「库里内容与兜底结构一致」。两者共用一个来源，这两条断言才同时成立。
  *
- * 这里只存**初始**内容：库建好之后，内容以数据库为准。
- * 改了本文件**不会**影响已建好的库（种子是幂等的，只在表为空时写入）。
+ * **内容条目（分类 / 标签 / 文章 / 项目 / 媒体）一律留空**：它们以数据库为准。
+ * 曾经这里放着一批示例条目，而种子是「表为空就灌」的 —— 于是把库清空之后，
+ * 下次启动它们又全回来了，「删干净」这件事永远不生效。现在这几个导出是空数组，
+ * `seedIfEmpty()` 也不再往这五张表写：内容只由后台录入，只活在库里。
  *
- * 三类数据分开存，各自的表不同：
- *   - `settings`    单项事实 → `site_settings`（一行一键，可直接读写单个值）
- *   - `sections`    结构化区块 → `site_sections`（一键一份 JSON 文档）
- *   - 其余（分类/标签/文章/项目/媒体）→ 各自的表，是「多条记录」而不是文档
+ * 仍然回灌的有两类，性质都不是内容：
+ *   - `settings` / `sections`：让站点跑得起来的默认配置（品牌、SEO、首页文案、简历），
+ *     后台没有删除入口，因此不存在「删了又回来」；缺了它们新库连品牌名都没有。
+ *   - `media`：随镜像发布的静态素材登记，后台删不掉（来源门 409），详见该项注释。
  */
 
 /**
@@ -321,213 +323,56 @@ export const sections = {
   },
 }
 
-/** 文章分类。前台筛选条即由此派生（不再手写一份）。 */
-export const categories = ['Android', '前端工程', '自托管', '工具链', '设计工程']
+/**
+ * 文章分类。
+ *
+ * **留空是刻意的**（理由见文件头「内容条目一律留空」）。分类与标签在后台
+ * 「分类与标签」屏维护；写在这里的话，库被清空之后下次启动会悄悄补回来。
+ */
+export const categories = []
 
 /**
  * 标签。
  *
  * 与分类的区别：分类是一篇一个（决定归档与列表筛选），标签是一篇多个（决定关键词）。
  * 前台在文章页底部展示标签；两者的增删改与排序在后台「分类与标签」屏。
+ *
+ * 同样留空：以库为准。
  */
-export const tags = ['adb', '自动化', '排版', 'PDF']
+export const tags = []
 
 /**
- * 文章。
+ * 文章。**留空是刻意的**（理由见文件头）。
  *
- * 数值口径（不假装精确）：`views` 由原展示串 '1.8k 阅读' 换算而来，是建站时的基线，
- * 不是真实统计 —— 真实阅读统计尚未接入，README 里已记为待办。
- *
- * `body` 是 Markdown。**只有真正写过的文章才有正文**：其余留空，
- * 文章页会如实显示「正文尚未撰写」，而不是拿别人的文章顶上。
- * 阅读时长由正文长度派生（`shared/derive.mjs`），不单独存列。
- *
- * `coverImage` 留空是**有意的**，不是漏填：这几篇都没有专属封面图，卡片会回退
- * `cover-default.svg`（六张 `post-*.png` 已随本次改动从仓库移出）。
+ * 曾经这里放着 6 篇示例文章。种子是「表为空就灌」的，于是把库清空之后，
+ * 下次启动这 6 篇又回来了 —— 「删干净了」这件事永远不会生效。
+ * 现在文章只活在库里：要内容就在后台写，本文件不再提供。
  */
-export const posts = [
-  {
-    slug: 'reusable-skill',
-    title: '把重复操作封装成可复用的技能',
-    category: '工具链',
-    excerpt: '从采集、拼接到排版：一次踩坑，长期受益的自动化套路。',
-    coverImage: '',
-    publishedAt: '2026-08-24T09:00:00.000Z',
-    views: 1800,
-    seoDescription: '',
-    tags: ['adb', '自动化', '排版'],
-    body: [
-      '每次遇到「把手机里的长列表导出来打印」这个需求，大多数人都会临时写一段脚本，用完就丢。在第八次重写同一段滚动逻辑之后，我决定把它做成一个可以被反复调用的能力。',
-      '',
-      '## 重复劳动的三个信号',
-      '',
-      '当一件事同时满足「步骤固定」「输入参数少」「每月至少发生一次」三个条件时，它就该被封装。临时脚本的问题不在写得慢，而在于每次都要重新踩一遍同样的坑。',
-      '',
-      '```bash',
-      "$ capture-long-list 'adb shell input swipe 540 1600 540 600 300'",
-      '# 1. 逐屏截图，同时记录当前 scrollTop',
-      '# 2. 以固定位移拼接，重叠区域做像素去重',
-      '# 3. 按 A4 可打印高度切分，输出满版 PDF',
-      '```',
-      '',
-      '> 能被复用的前提，是把「我知道怎么做」写进「工具知道怎么做」。',
-      '',
-      '## 拆成三段来做',
-      '',
-      '- 采集：固定位移滚动，逐屏截图并记录偏移量，不依赖任何 UI 控件。',
-      '- 拼接：按重叠区域做像素去重，长图既不重复也不失真。',
-      '- 输出：按 A4 可用高度分页，支持按年度与月份分册打印。',
-      '',
-      '## 回看这次封装',
-      '',
-      '封装的价值不在代码量，而在于把「我这次是怎么做的」变成「任何人下次都能这么做」。工具越具体，复用率越高；越通用，反而越没人用。',
-      '',
-      '## 附：完整脚本与参数说明',
-      '',
-      '完整脚本、参数说明与踩坑记录整理在项目的 README 中，可直接按需取用。',
-    ].join('\n'),
-  },
-  {
-    slug: 'self-hosted-ci-traps',
-    title: '自托管 CI 的表达式陷阱与规避',
-    category: '自托管',
-    excerpt: 'workflow_dispatch 输入不可用时，用环境变量兜底的两段式写法。',
-    coverImage: '',
-    publishedAt: '2026-07-11T09:00:00.000Z',
-    views: 2400,
-    seoDescription: '',
-    tags: [],
-    body: '',
-  },
-  {
-    slug: 'pixel-parity-audit',
-    title: '设计稿与实现之间，还差一次像素对账',
-    category: '设计工程',
-    excerpt: '用截图取证，把「差不多」变成可量化的偏差清单。',
-    coverImage: '',
-    publishedAt: '2026-06-02T09:00:00.000Z',
-    views: 1300,
-    seoDescription: '',
-    tags: [],
-    body: '',
-  },
-  {
-    slug: 'adb-long-list',
-    title: '用 adb 批量采集长列表的正确姿势',
-    category: '工具链',
-    excerpt: '滚动、去重、拼接：三个阶段各自的坑与规避方式。',
-    coverImage: '',
-    publishedAt: '2026-05-19T09:00:00.000Z',
-    views: 3100,
-    seoDescription: '',
-    tags: [],
-    body: '',
-  },
-  {
-    slug: 'faster-pipeline',
-    title: '让构建流水线快 40% 的四次改动',
-    category: '工具链',
-    excerpt: '缓存命中率、镜像复用与并行阶段的实际收益拆解。',
-    coverImage: '',
-    publishedAt: '2026-04-07T09:00:00.000Z',
-    views: 2000,
-    seoDescription: '',
-    tags: [],
-    body: '',
-  },
-  {
-    slug: 'single-host-services',
-    title: '单机跑十个服务的资源分配实践',
-    category: '自托管',
-    excerpt: '内存、端口与反向代理的取舍，以及监控最小集。',
-    coverImage: '',
-    publishedAt: '2026-03-12T09:00:00.000Z',
-    views: 1500,
-    seoDescription: '',
-    tags: [],
-    body: '',
-  },
-]
+export const posts = []
 
 /**
- * 项目。
+ * 项目。**留空是刻意的**（理由见文件头，与文章同理）。
  *
- * `featured` 决定首页「精选项目」显示哪几个；没有标记精选时前台退化为按排序取前 3，
- * 不会出现首页空一块。前台项目页的筛选条由 `language` 派生。
+ * 项目字段的两个约定仍然有效，写内容时照着来：
+ *   - `repoUrl` 只填**确实存在**的仓库地址。按 slug 拼一个 `github.com/<用户名>/<slug>`
+ *     是最省事的写法，代价是每张卡片挂着一条 404 —— 读者会以为自己点错了，
+ *     而真正的原因是这条地址从来没存在过。没有公开仓库的项目就让它没有链接。
+ *   - 没有 stars / forks：这两个数没有来源，手填多少都是编的。
  */
-export const projects = [
-  {
-    slug: 'a4-print',
-    title: 'Android 长列表 A4 打印工具链',
-    description:
-      '用 adb 滚动采集 App 长列表，像素级拼接后自动排成 A4 满版 PDF，支持按年度与月份分册。',
-    tags: 'TypeScript · adb · Pillow',
-    language: 'TypeScript',
-    stars: 1200,
-    forks: 186,
-    featured: true,
-  },
-  {
-    slug: 'windows-vm',
-    title: 'Windows 虚拟机容器化部署方案',
-    description:
-      '在 Debian 宿主机上用容器跑起 Windows 虚拟机，KVM 加速、磁盘落点到 RDP 验收全流程脚本化。',
-    tags: 'Shell · Docker · KVM',
-    language: 'Shell',
-    stars: 486,
-    forks: 64,
-    featured: true,
-  },
-  {
-    slug: 'pixel-parity',
-    title: '设计稿像素级对齐校验器',
-    description: '驱动无头浏览器截图并做像素取证，把设计稿与实现之间的偏差变成可量化的修复清单。',
-    tags: 'TypeScript · Playwright · Canvas',
-    language: 'TypeScript',
-    stars: 268,
-    forks: 42,
-    featured: true,
-  },
-  {
-    slug: 'selfhost-scaffold',
-    title: '自托管服务部署脚手架',
-    description: '一套 Compose 模板与运维脚本，把反向代理、证书续期、定时备份与基础监控一次配好。',
-    tags: 'Shell · Docker · Nginx',
-    language: 'Shell',
-    stars: 742,
-    forks: 98,
-    featured: false,
-  },
-  {
-    slug: 'usb-token-check',
-    title: 'macOS USB 令牌识别诊断工具',
-    description: '只读判定 USB 安全令牌能否作为智能卡被系统识别，输出可直接定位问题的诊断报告。',
-    tags: 'Python · PC/SC · macOS',
-    language: 'Python',
-    stars: 196,
-    forks: 27,
-    featured: false,
-  },
-  {
-    slug: 'skill-workflow',
-    title: '技能库与自动化工作流集',
-    description: '把日常重复操作沉淀成可复用技能，覆盖采集、拼接、排版、校验与发布全流程。',
-    tags: 'TypeScript · Node.js · CLI',
-    language: 'TypeScript',
-    stars: 1600,
-    forks: 204,
-    featured: false,
-  },
-]
+export const projects = []
 
 /**
- * `public/images` 下的静态资源，登记成媒体库的初始条目。
+ * `public/images` 下的静态素材，登记成媒体库的初始条目。
  *
- * 文章封面（`post-*.png`）本次已连文件一起移出：卡片在无封面时走
- * `cover-default.svg`，留着一批「只为每篇配一张」而存在的图，反而让「没配图」
- * 看起来像坏了。**文章侧的 `coverImage` 必须同步清空** —— 它不是空串时
- * `post.image` 为非空值，会绕过默认封面直连一个已删除的地址（404 破图）。
- * 后台媒体库里的旧行也一并清掉，否则列表里会挂着六条指向不存在文件的登记。
+ * **这是唯一还会回灌的条目**，理由与文章/项目不同：
+ *   1. 它不是内容，是**随镜像一起发布的素材**（头像与 Hero 图）。文件本体在版本库里，
+ *      运行期删掉会在下次构建时被拷回来；登记行同理。
+ *   2. 后台**删不掉**它 —— 媒体删除的来源门对 `/images/*` 一律 409，界面按钮也是禁用的。
+ *      所以它不会给人「删了又回来」的错觉：那道删除动作从来没有成功过。
+ *   3. 「来源门」这条规则需要一条 `/images/*` 的样本才能被验证；素材登记被清空之后，
+ *      全新库里就再也找不到这类条目，规则本身会退化成没有被测过的死代码。
+ *
+ * 文章封面（`post-*.png`）早已连文件一起移出，不在此列。
  */
 export const media = [
   { filename: 'hero-workspace.png', alt: '首页 Hero 工作台配图' },

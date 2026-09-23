@@ -208,7 +208,6 @@ export function presentContent(doc) {
     .sort((a, b) => b.count - a.count)
     .map((x) => x.name)
 
-  const totalStars = projects.reduce((sum, p) => sum + (Number(p.stars) || 0), 0)
   const lastPost = posts[0]
 
   return {
@@ -288,10 +287,6 @@ export function presentContent(doc) {
       description: p.description ?? '',
       tags: p.tags ?? '',
       language: p.language ?? '',
-      stars: Number(p.stars) || 0,
-      starsLabel: countLabel(p.stars),
-      forks: Number(p.forks) || 0,
-      forksLabel: countLabel(p.forks),
       repoUrl: p.repoUrl ?? '',
       featured: Boolean(p.featured),
     })),
@@ -302,7 +297,7 @@ export function presentContent(doc) {
     },
     stats: {
       blog: `${posts.length} 篇文章 · ${categoryNames.length} 个分类${lastPost ? ` · 最后更新 ${formatMonth(lastPost.publishedAt)}` : ''}`,
-      projects: `${projects.length} 个项目 · 累计 ${countLabel(totalStars)} stars${
+      projects: `${projects.length} 个项目${
         languageRank.length ? ` · 主要语言 ${languageRank.slice(0, 2).join(' / ')}` : ''
       }`,
     },

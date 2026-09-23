@@ -172,10 +172,6 @@ export interface ProjectItem {
   description: string
   tags: string
   language: string
-  stars: number
-  starsLabel: string
-  forks: number
-  forksLabel: string
   /** 后台允许留空（校验只拦非 http(s)），库里可为 NULL，渲染前需判空 */
   repoUrl: string | null
   featured: boolean

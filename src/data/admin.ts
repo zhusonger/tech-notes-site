@@ -272,6 +272,82 @@ export const adminPostsCopy = {
   untitled: '（未命名）',
   uncategorized: '未分类',
   confirmDelete: '彻底删除后无法恢复，确定删除《{title}》？',
+  /**
+   * 多选批量。
+   *
+   * 文案里说的是「本页」而不是「全部筛选结果」：选中范围就是当前页（见 `usePageSelection`），
+   * 说成「全部筛选结果」会让人以为翻页之后那些也算 —— 而它们不算。
+   */
+  /*
+   * 多选批量。
+   *
+   * 五个动作都属于「状态流转 + 删除」这一类：它们不需要任何输入框，
+   * 批量与单条说的是同一件事。而**编辑**不在其中 —— 它是打开一个编辑器，
+   * 一批文章不可能同时被编辑；把这类动作放进批量，只会得到一个「看起来能用、
+   * 点了只处理最后一条」的假按钮。
+   *
+   * 每个动作一套四件套（`label` / `title` / `message` / `skipHint`），key 与接口
+   * 的 action 同名。于是界面上的按钮清单可以由「选中了些什么」算出来，而不是
+   * 一份写死的列表 —— 形态变了，可操作的动作跟着变，不需要回来补文案。
+   */
+  bulk: {
+    selected: '已选 {n} 篇',
+    clear: '取消选择',
+    selectAll: '全选本页',
+    selectRow: '选择《{title}》',
+    /** 全选当前筛选。只在「总条数 > 本页条数」时才值得一说 —— 否则它与全选本页是同一件事 */
+    selectAllFiltered: '选中符合当前筛选的全部 {n} 篇',
+    /** 「按筛选全选」状态下的那句解释：这些不在屏幕上 */
+    allScopeHint: '含其他页',
+    /** 回到「只选屏幕上这几条」 */
+    exitAllScope: '只选本页',
+    actions: {
+      publish: {
+        label: '发布',
+        title: '发布选中的 {n} 篇文章？',
+        message: '它们会立刻出现在前台的文章列表里。',
+        skipHint: '不是草稿的会被跳过',
+      },
+      unpublish: {
+        label: '转为草稿',
+        title: '把选中的 {n} 篇文章转为草稿？',
+        message: '转为草稿后前台立刻不再显示，文章内容都还在。',
+        skipHint: '不是已发布的会被跳过',
+      },
+      trash: {
+        label: '移入回收站',
+        title: '把选中的 {n} 篇文章移入回收站？',
+        message: '移入回收站后前台立刻不再显示它们，之后可以在「回收站」页签里恢复或彻底删除。',
+        skipHint: '已在回收站的会被跳过',
+      },
+      restore: {
+        label: '移出回收站',
+        title: '把选中的 {n} 篇文章移出回收站？',
+        message: '它们会回到「草稿」状态，之后可以重新发布。',
+        skipHint: '不在回收站里的会被跳过',
+      },
+      delete: {
+        label: '彻底删除',
+        title: '彻底删除选中的 {n} 篇文章？',
+        message: '彻底删除后无法恢复，正文与历史阅读量一并消失。',
+        skipHint: '只有回收站里的文章可以彻底删除，其余的会被跳过',
+      },
+    },
+    /** 弹层里的跳过说明：`{hint}` 是上面那句，`{n}` 是会被跳过的条数 */
+    skipNote: '{hint} · 将跳过 {n} 篇',
+    /** 操作后那张「被跳过」清单的抬头，清单本身来自服务端回的 `skipped` */
+    skipped: '以下 {n} 篇被跳过：',
+    /* 回执：{done} 是真的动了的条数，{skipped} 是被跳过的条数 */
+    done: '已处理 {done} 篇',
+    doneWithSkips: '已处理 {done} 篇 · 跳过 {skipped} 篇',
+    none: '选中的文章都不符合条件，没有可处理的项',
+    failed: '批量操作失败',
+    /**
+     * 「列表已经变了」的 409：服务端算出的条数与界面上的不一致，拒绝执行。
+     * 这不是错误，是一次重新确认 —— 所以文案要说明发生了什么、该做什么。
+     */
+    stale: '列表发生了变动（现在是 {actual} 篇，你看到的是 {expected} 篇），已取消本次操作，请重新选择',
+  },
 } as const
 
 /**
@@ -462,7 +538,8 @@ export const adminSettingsCopy = {
  * 项目卡片墙。
  *
  * 副标题与画布一致地由**真实计数**拼（画布上的「20 个项目 · 6 个精选 · 累计 6.8k stars」
- * 是示意数字），所以这里只留句式。
+ * 是示意数字），所以这里只留句式。其中「累计 stars」这一项已经去掉：
+ * 项目上没有可依赖的 star 数据源，写上去就是编一个数。
  */
 /* ------------------------------------------------------------ 区块表单通用 */
 /**
@@ -714,8 +791,9 @@ export const adminMediaCopy = {
     titleOf: '{kind}',
     subtitle: '根目录 · {sort}',
     subtitleFiltered: '根目录 · {kind} · {sort}',
+    /** 卡片头那颗胶囊说的是**勾选**的数量（批量删除会影响到的那批），不是右面板在看哪个文件 */
     selected: '{n} 项已选',
-    noSelection: '未选中文件',
+    noSelection: '未勾选文件',
     empty: '这个分组下还没有文件',
     emptyHint: '拖一张图到左边的上传区试试',
     missing: '文件已不在磁盘上',
@@ -770,6 +848,49 @@ export const adminMediaCopy = {
     done: '「{name}」已删除',
     fileKept: '数据库记录已删除，但磁盘上的文件没能删掉，请手动清理',
     failed: '删除失败',
+    /** 来源档不允许删除时，详情面板脚注那句话的抬头（理由本身由服务端下发） */
+    blockedTitle: '这个文件删不掉',
+  },
+
+  /** 来源徽标。档位名与「能不能删」都来自服务端（`policy.origins`），这里只有界面用语 */
+  origin: { field: '来源' },
+
+  /**
+   * 多选批量。
+   *
+   * 这一屏的批量**只做删除**（最小集）。确认弹层在动手之前就把「哪些会被跳过」
+   * 逐条摆出来 —— 依据是列表项自带的来源与引用数，与服务端跳过用的是同一份数据，
+   * 所以不会出现「确认时没说、回执里才发现少删了两个」。
+   */
+  bulk: {
+    selected: '已选 {n} 项',
+    clear: '取消选择',
+    selectAll: '全选本页',
+    selectRow: '选择 {name}',
+    selectAllFiltered: '选中当前分组的全部 {n} 项',
+    allScopeHint: '含其他页',
+    exitAllScope: '只选本页',
+    actions: {
+      delete: {
+        label: '删除文件',
+        /**
+         * 弹层标题里的 `{n}` 是**真正会被删掉的数量**，不是选中总数：
+         * 被跳过的那几项由下面的清单解释，标题说清「按下确认会发生什么」。
+         */
+        title: '删除选中的 {n} 个文件？',
+        message: '磁盘上的文件会一并删除，删除后无法恢复。',
+        skipHint: '被引用的文件、以及随构建发布的素材不会被删掉',
+      },
+    },
+    /** 弹层里的跳过说明：`{hint}` 是上面那句，`{n}` 是会被跳过的条数 */
+    skipNote: '{hint} · 将跳过 {n} 项',
+    /** 操作后那张「被跳过」清单的抬头，清单本身来自服务端回的 `skipped`（含逐条理由） */
+    skipped: '以下 {n} 项被跳过：',
+    done: '已删除 {done} 个文件',
+    doneWithSkips: '已删除 {done} 个 · 跳过 {skipped} 个',
+    none: '选中的 {n} 项都删不掉，没有可删除的文件',
+    failed: '批量删除失败',
+    stale: '媒体发生了变动（现在是 {actual} 项，你看到的是 {expected} 项），已取消本次操作，请重新选择',
   },
 
   loadError: '媒体库加载失败',
@@ -901,14 +1022,14 @@ export const adminProjectsCopy = {
   title: '项目',
   /** 顶栏那颗主操作按钮上的字。画布上项目屏写的是「新建项目」，与文章屏不同。 */
   newProject: '新建项目',
-  subtitle: '{all} 个项目 · {featured} 个精选 · 累计 {stars} stars · {reorder}',
+  subtitle: '{all} 个项目 · {featured} 个精选 · {reorder}',
   reorderOn: '拖拽卡片调整前台顺序',
   /** 拖不动时必须说清为什么，而不是把把手悄悄变灰 */
   reorderOff: '清除筛选并切回「按排序权重」后可拖拽排序',
   filter: { all: '全部', language: '全部语言', sort: '按排序权重' },
-  sortOptions: { order: '按排序权重', stars: '按 Stars', updated: '按更新时间' },
+  sortOptions: { order: '按排序权重', updated: '按更新时间' },
   counts: { all: '全部 {n}', featured: '精选 {n}' },
-  card: { featuredBadge: '精选', draftBadge: '未上架', stars: '{n} stars' },
+  card: { featuredBadge: '精选', draftBadge: '未上架' },
   rowMenu: {
     edit: '编辑',
     feature: '加入精选',
@@ -937,11 +1058,73 @@ export const adminProjectsCopy = {
     filtered: '这个语言下还没有项目',
     hint: '点右上角「新建项目」添加第一个',
   },
-  footer: { summary: '共 {total} 个项目 · 精选 {featured} · 累计 {stars} stars' },
+  footer: { summary: '共 {total} 个项目 · 精选 {featured}' },
   error: '项目列表加载失败',
   retry: '重试',
   confirmRemoveTitle: '删除项目',
   confirmDelete: '删除后无法恢复，确定删除《{title}》？',
+  /**
+   * 多选批量。与文章屏同构，但量词是「个」、动作只有删除 ——
+   * 上架 / 精选这类状态流转没有做批量，最小集只到删除为止。
+   */
+  /*
+   * 多选批量。与文章屏同构，差别只有两点：量词是「个」，动作是两个开关的双向
+   * （发布 / 草稿、精选 / 不精选）加删除。
+   *
+   * **编辑、打开仓库、上移下移**不在其中：编辑是打开表单、打开仓库是跳转外部页面，
+   * 而「上移 / 下移」依赖条目在整份顺序里的绝对位置 —— 一批项目同时上移，
+   * 谁先动谁后动会改变结果，这个语义在批量下不成立。
+   */
+  bulk: {
+    selected: '已选 {n} 个项目',
+    clear: '取消选择',
+    selectAll: '全选本页',
+    selectRow: '选择《{title}》',
+    selectAllFiltered: '选中符合当前筛选的全部 {n} 个项目',
+    allScopeHint: '含其他页',
+    exitAllScope: '只选本页',
+    actions: {
+      publish: {
+        label: '发布',
+        title: '发布选中的 {n} 个项目？',
+        message: '它们会出现在前台的项目卡片墙上。',
+        skipHint: '已经是已发布的会被跳过',
+      },
+      unpublish: {
+        label: '转为草稿',
+        title: '把选中的 {n} 个项目转为草稿？',
+        message: '转为草稿后前台不再显示，内容都还在。',
+        skipHint: '已经是草稿的会被跳过',
+      },
+      feature: {
+        label: '设为精选',
+        title: '把选中的 {n} 个项目设为精选？',
+        message: '精选的项目会优先出现在首页的项目区块里。',
+        skipHint: '已经是精选的会被跳过',
+      },
+      unfeature: {
+        label: '取消精选',
+        title: '取消选中的 {n} 个项目的精选？',
+        message: '它们仍在前台显示，只是不再占用首页的精选位。',
+        skipHint: '本来就没精选的会被跳过',
+      },
+      delete: {
+        label: '删除项目',
+        title: '删除选中的 {n} 个项目？',
+        message: '删除后无法恢复，卡片与它的排序位置一并消失。',
+        skipHint: '已经不在库里的会被跳过',
+      },
+    },
+    /** 弹层里的跳过说明：`{hint}` 是上面那句，`{n}` 是会被跳过的条数 */
+    skipNote: '{hint} · 将跳过 {n} 个',
+    /** 操作后那张「被跳过」清单的抬头，清单本身来自服务端回的 `skipped` */
+    skipped: '以下 {n} 个项目被跳过：',
+    done: '已处理 {done} 个项目',
+    doneWithSkips: '已处理 {done} 个 · 跳过 {skipped} 个',
+    none: '选中的项目都不符合条件，没有可处理的项目',
+    failed: '批量操作失败',
+    stale: '列表发生了变动（现在是 {actual} 个，你看到的是 {expected} 个），已取消本次操作，请重新选择',
+  },
   /* 弹层 */
   dialog: {
     createTitle: '新建项目',
@@ -962,10 +1145,9 @@ export const adminProjectsCopy = {
     languageNew: '新语言名称',
     languageNewPlaceholder: '例如 Kotlin',
     languageNewEmpty: '选了「其他语言」就要填一个名字',
-    stars: 'Stars',
-    forks: 'Forks',
     repoUrl: '仓库地址',
-    repoUrlHint: '必须以 http:// 或 https:// 开头',
+    /** 提示里把「没有就留空」说在前头：填一个按 slug 猜出来的地址只会挂一条 404 */
+    repoUrlHint: '必须以 http:// 或 https:// 开头；还没有公开仓库就留空',
     featured: '在首页精选位展示',
     status: '上架状态',
     statusPublished: '已上架',

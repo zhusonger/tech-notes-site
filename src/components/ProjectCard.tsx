@@ -1,10 +1,15 @@
 import type { ReactNode } from 'react'
 import type { ProjectItem } from '../data/site'
-import { ExternalIcon, ForkIcon, StarIcon, techIcon } from './Icons'
+import { ExternalIcon, techIcon } from './Icons'
 
 interface ProjectCardProps {
   project: ProjectItem
-  /** compact：首页精选项目（图标 + 文案行）；full：项目页卡片（含 stars / forks） */
+  /**
+   * compact：首页精选项目（图标 + 文案行）；full：项目页卡片。
+   *
+   * 两种变体差别只在留白与字号 —— 卡片上不再有 stars / forks：那两个数没有数据源，
+   * 手填的数字摆出来只会让「项目热度」变成一句假话。
+   */
   variant?: 'compact' | 'full'
 }
 
@@ -69,15 +74,9 @@ export function ProjectCard({ project, variant = 'full' }: ProjectCardProps) {
           <p className="font-cn text-[13px] leading-[1.7] text-[var(--color-ink-2)]">
             {project.description}
           </p>
-          <div className="flex flex-wrap items-center gap-x-[16px] gap-y-[8px] pt-[2px]">
-            <span className="font-latin text-[12px] leading-none text-[var(--color-ink-3)]">
-              {project.tags}
-            </span>
-            <span className="inline-flex items-center gap-[6px] font-latin text-[12px] leading-none text-[var(--color-ink-2)]">
-              <StarIcon className="h-[14px] w-[14px] text-[var(--color-primary)]" />
-              {project.starsLabel}
-            </span>
-          </div>
+          <span className="pt-[2px] font-latin text-[12px] leading-none text-[var(--color-ink-3)]">
+            {project.tags}
+          </span>
         </div>
       </Shell>
     )
@@ -98,21 +97,9 @@ export function ProjectCard({ project, variant = 'full' }: ProjectCardProps) {
       <p className="font-cn text-[14px] leading-[1.75] text-[var(--color-ink-2)]">
         {project.description}
       </p>
-      <div className="mt-auto flex flex-col gap-[14px] pt-[6px]">
-        <span className="font-latin text-[12px] leading-none text-[var(--color-ink-3)]">
-          {project.tags}
-        </span>
-        <div className="flex items-center gap-[20px] border-t border-[var(--color-line-soft)] pt-[14px]">
-          <span className="inline-flex items-center gap-[6px] font-latin text-[13px] leading-none text-[var(--color-ink-2)]">
-            <StarIcon className="h-[15px] w-[15px] text-[var(--color-primary)]" />
-            {project.starsLabel}
-          </span>
-          <span className="inline-flex items-center gap-[6px] font-latin text-[13px] leading-none text-[var(--color-ink-2)]">
-            <ForkIcon className="h-[15px] w-[15px] text-[var(--color-ink-3)]" />
-            {project.forksLabel}
-          </span>
-        </div>
-      </div>
+      <span className="mt-auto pt-[6px] font-latin text-[12px] leading-none text-[var(--color-ink-3)]">
+        {project.tags}
+      </span>
     </Shell>
   )
 }

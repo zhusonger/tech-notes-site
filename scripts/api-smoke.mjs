@@ -185,7 +185,12 @@ async function main() {
   // 2f. 单篇详情：正文、目录、上下篇、作者卡；未知 slug 必须 JSON 404
   const firstSlug = doc.posts?.[0]?.slug
   if (!firstSlug) {
-    fail('读取单篇文章详情', '内容接口里没有已发布文章可测')
+    /*
+     * 空库（还没有任何文章）时这里没有可测的对象 —— 不是缺陷，是内容以库为准的结果。
+     * 同一条断言在 8b 步（夹具建好之后）会真的跑一遍，所以覆盖率没有丢，
+     * 只是首次运行要等到登录之后才验得到。
+     */
+    ok('跳过匿名单篇详情：库里还没有文章（8b 步建好夹具后单独断言）')
   } else {
     const one = await call('GET', `/api/content/posts/${firstSlug}`)
     const detail = one.json ?? {}
@@ -302,6 +307,88 @@ async function main() {
     noActionFilter.status === 200 && noActionFilter.json?.result === 'all' && noActionFilter.json?.range === 7,
     `result=${noActionFilter.json?.result} range=${noActionFilter.json?.range}`
   )
+
+  /*
+   * 8b. 夹具：内容以库为准，所以冒烟脚本自己准备数据。
+   *
+   * `shared/content.mjs` 不再提供示例文章 / 项目 / 分类 / 标签（种子会在库被清空之后
+   * 把它们又灌回来，让「删干净」永远不生效）。而后面大批断言需要一个**有内容**的库：
+   * 「永久链接撞车返回 409」得有另一个人可撞，「排序列表不完整被拒」得至少三条才切得动，
+   * 「分类列表带文章计数」得先有分类。所以这里照旧量自己建一份 ——
+   * 数量与名字沿用原来的种子（分类 5 个、项目 8 个、文章 6 篇），下游断言不必改口径。
+   *
+   * 只在缺的时候建：重复跑冒烟不会把夹具堆成几十条。
+   */
+  const FIXTURE_CATEGORIES = ['Android', '前端工程', '自托管', '工具链', '设计工程']
+  const FIXTURE_TAGS = ['adb', '自动化', '排版', 'PDF']
+  const FIXTURE_LANGUAGES = ['TypeScript', 'TypeScript', 'TypeScript', 'TypeScript', 'Shell', 'Shell', 'Python', 'C']
+
+  const tax0Fixture = await call('GET', '/api/admin/taxonomy')
+  const fixtureCats = tax0Fixture.json?.categories ?? []
+  const fixtureTags = tax0Fixture.json?.tags ?? []
+
+  for (const name of FIXTURE_CATEGORIES) {
+    if (!fixtureCats.some((c) => c.name === name)) await call('POST', '/api/admin/categories', { name })
+  }
+  for (const name of FIXTURE_TAGS) {
+    if (!fixtureTags.some((t) => t.name === name)) await call('POST', '/api/admin/tags', { name })
+  }
+
+  const postsFixture = await call('GET', '/api/admin/posts?perPage=100')
+  if ((postsFixture.json?.items ?? []).length < 2) {
+    for (let i = 0; i < 6; i += 1) {
+      const made = await call('POST', '/api/admin/posts', {
+        title: `夹具文章 ${i + 1}`,
+        category: FIXTURE_CATEGORIES[i % FIXTURE_CATEGORIES.length],
+        excerpt: '由冒烟测试准备的夹具内容，跑完不清理（它就是这个库的内容）。',
+        // 只有第一篇给正文：目录与阅读时长是从正文派生的，得有一个能派生出东西的样本
+        body: i === 0 ? '## 夹具小标题\n\n这是夹具正文，用来验证目录与阅读时长。' : '',
+        tags: [FIXTURE_TAGS[i % FIXTURE_TAGS.length]],
+      })
+      const id = made.json?.post?.id
+      if (Number.isInteger(id)) await call('PATCH', `/api/admin/posts/${id}`, { status: 'published' })
+    }
+  }
+
+  const projectsFixture = await call('GET', '/api/admin/projects')
+  if ((projectsFixture.json?.items ?? []).length < 3) {
+    for (const [i, language] of FIXTURE_LANGUAGES.entries()) {
+      await call('POST', '/api/admin/projects', {
+        title: `夹具项目 ${i + 1}`,
+        description: '由冒烟测试准备的夹具项目。',
+        tags: language,
+        language,
+        featured: i === 0,
+      })
+    }
+  }
+
+  /*
+   * 匿名读单篇详情 —— 顶替原来「登录前那一段」的同类断言。
+   *
+   * 夹具只能在登录之后建，而「前台不依赖登录态」这条又必须不带会话才能证明，
+   * 所以这里临时把 cookie 摘掉再请求。第 2f 步在空库上会跳过（那时还没有任何文章）。
+   */
+  const cookieBeforeFixture = cookie
+  cookie = ''
+  const anonDoc = await call('GET', '/api/content')
+  const anonSlug = anonDoc.json?.posts?.[0]?.slug
+  const anonOne = await call('GET', `/api/content/posts/${encodeURIComponent(anonSlug ?? '')}`)
+  assert(
+    '匿名可读单篇文章详情（正文 + 目录 + 作者卡，且不外泄状态字段）',
+    Boolean(anonSlug) &&
+      anonOne.status === 200 &&
+      typeof anonOne.json?.body === 'string' &&
+      Array.isArray(anonOne.json?.toc) &&
+      anonOne.json?.author?.name === anonDoc.json?.site?.author &&
+      (anonOne.json?.prev === null || typeof anonOne.json?.prev?.slug === 'string') &&
+      (anonOne.json?.next === null || typeof anonOne.json?.next?.slug === 'string') &&
+      !('status' in (anonOne.json ?? {})),
+    `《${anonOne.json?.title ?? '—'}》 · 正文 ${String(anonOne.json?.body ?? '').length} 字 · 目录 ${
+      anonOne.json?.toc?.length ?? 0
+    } 项`
+  )
+  cookie = cookieBeforeFixture
 
   // 9. 账号资料
   const before = await call('GET', '/api/admin/account')
@@ -596,7 +683,7 @@ async function main() {
       seedProjects.length === baseCounts?.all &&
       (projectsBefore.json?.languages ?? []).length > 0 &&
       (projectsBefore.json?.languages ?? []).every((l) => l.count > 0),
-    `${seedProjects.length} 个项目 · ${projectsBefore.json?.languages?.length ?? 0} 种语言 · 累计 ${baseCounts?.starsLabel} stars`
+    `${seedProjects.length} 个项目 · ${projectsBefore.json?.languages?.length ?? 0} 种语言`
   )
   assert(
     '各语言计数之和等于有语言的项目数（没有项目落在筛选之外）',
@@ -609,8 +696,6 @@ async function main() {
     description: '由 api-smoke 创建，跑完即删。',
     tags: 'TypeScript · 测试',
     language: 'TypeScript',
-    stars: 123,
-    forks: 4,
     repoUrl: 'https://example.com/smoke-project',
   })
   const createdProject = projectCreated.json?.project
@@ -627,20 +712,21 @@ async function main() {
     `末尾是「${afterCreate.json?.items?.at(-1)?.title ?? '-'}」`
   )
   assert(
-    '项目数与 stars 累计同步更新',
-    afterCreate.json?.counts?.all === baseCounts?.all + 1 &&
-      afterCreate.json?.counts?.stars === baseCounts?.stars + 123,
-    `${afterCreate.json?.counts?.all} 个项目 · 累计 ${afterCreate.json?.counts?.starsLabel}`
+    '项目总数随新建 +1',
+    afterCreate.json?.counts?.all === baseCounts?.all + 1,
+    `${baseCounts?.all} → ${afterCreate.json?.counts?.all} 个项目`
   )
 
   const projectUpdated = await call('PATCH', `/api/admin/projects/${createdProject?.id}`, {
     title: '冒烟测试项目（已改）',
     featured: true,
-    stars: 321,
+    repoUrl: 'https://example.com/smoke-project-2',
   })
   assert(
-    '更新项目：精选标记与 stars 一起写入',
-    projectUpdated.status === 200 && projectUpdated.json?.project?.featured === true && projectUpdated.json?.project?.stars === 321,
+    '更新项目：精选标记与仓库地址一起写入',
+    projectUpdated.status === 200 &&
+      projectUpdated.json?.project?.featured === true &&
+      projectUpdated.json?.project?.repoUrl === 'https://example.com/smoke-project-2',
     projectUpdated.json?.error ?? `字段：${projectUpdated.json?.fields?.join('、') ?? '-'}`
   )
   assert(
@@ -697,7 +783,13 @@ async function main() {
 
   const projectFieldCases = [
     ['项目名称为空被拒', await call('POST', '/api/admin/projects', { title: '   ' }), 400],
-    ['stars 为负数被拒', await call('PATCH', `/api/admin/projects/${createdProject?.id}`, { stars: -1 }), 400],
+    /* stars / forks 已经从项目上拿掉了：只提交它们时服务端没有可保存的字段，
+       于是按「没有可保存的字段」拒掉 —— 静默写进去才更糟。 */
+    [
+      '已移除的 stars 不再落库（只剩它时按「没有可保存的字段」拒）',
+      await call('PATCH', `/api/admin/projects/${createdProject?.id}`, { stars: -1 }),
+      400,
+    ],
     [
       '仓库地址非 http(s) 被拒（不给卡片挂脚本留口子）',
       await call('PATCH', `/api/admin/projects/${createdProject?.id}`, { repoUrl: 'javascript:alert(1)' }),
@@ -730,8 +822,8 @@ async function main() {
     projectRemoved.status === 200 &&
       projectRemoved.json?.deleted === true &&
       projectsAfter.json?.counts?.all === baseCounts?.all &&
-      projectsAfter.json?.counts?.stars === baseCounts?.stars,
-    `${projectsAfter.json?.counts?.all} 个项目 · 累计 ${projectsAfter.json?.counts?.starsLabel}`
+      projectsAfter.json?.counts?.featured === baseCounts?.featured,
+    `${projectsAfter.json?.counts?.all} 个项目 · 精选 ${projectsAfter.json?.counts?.featured}`
   )
 
   /*

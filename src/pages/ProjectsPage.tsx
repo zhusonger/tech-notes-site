@@ -47,8 +47,8 @@ export default function ProjectsPage() {
               })}
             </div>
             {/*
-              顺序由后台决定（精选优先，其次 sorting 权重）。这里不能写「按 stars 排序」——
-              实际序列既不是按 stars 也不是按名称，写出来就是一句假话。
+              顺序由后台决定（精选优先，其次排序权重）。这里不写具体排序口径 ——
+              实际序列既不是按时间也不是按名称，写出来就是一句假话。
             */}
             <span className="font-cn text-[13px] leading-none text-[var(--color-ink-3)]">
               按精选顺序

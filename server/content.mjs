@@ -75,7 +75,7 @@ export function readContentDoc() {
   }))
 
   const projects = all(
-    `SELECT id, slug, title, description, tags, language, stars, forks, repo_url, featured, status, sort_order
+    `SELECT id, slug, title, description, tags, language, repo_url, featured, status, sort_order
      FROM projects`
   ).map((r) => ({
     id: r.id,
@@ -84,8 +84,6 @@ export function readContentDoc() {
     description: r.description,
     tags: r.tags,
     language: r.language,
-    stars: r.stars,
-    forks: r.forks,
     repoUrl: r.repo_url,
     featured: Boolean(r.featured),
     status: r.status,

@@ -345,8 +345,13 @@ export interface TagMergeResponse extends TaxonomyFacets {
 /** 项目只有两态：在前台挂着，或者先收起来。它没有文章那样的回收站。 */
 export type ProjectStatus = 'published' | 'draft'
 
-/** 「按排序权重」是拖拽排出来的顺序；另两个是只读的观察角度，都不能拖。 */
-export type ProjectSortKey = 'order' | 'stars' | 'updated'
+/**
+ * 「按排序权重」是拖拽排出来的顺序；「按更新时间」是只读的观察角度，不能拖。
+ *
+ * 这里原本还有「按 Stars」—— 随 stars / forks 字段一起去掉了：那个数是手填的，
+ * 按它排序等于按编的数字排序。
+ */
+export type ProjectSortKey = 'order' | 'updated'
 
 export interface ProjectItem {
   id: number
@@ -355,8 +360,6 @@ export interface ProjectItem {
   description: string
   tags: string
   language: string
-  stars: number
-  forks: number
   repoUrl: string
   featured: boolean
   status: ProjectStatus
@@ -368,10 +371,10 @@ export interface ProjectItem {
 
 export interface ProjectFacets {
   /**
-   * 副标题上的三个数说的是「一共多少」，不随筛选变小 ——
+   * 副标题上的两个数说的是「一共多少」，不随筛选变小 ——
    * 所以它们与 `items` 无关，任何时候都能照常显示。
    */
-  counts: { all: number; featured: number; stars: number; starsLabel: string }
+  counts: { all: number; featured: number }
   /** 语言筛选条。按项目数降序，与画布上的排法一致。 */
   languages: { name: string; count: number }[]
 }
@@ -388,8 +391,6 @@ export interface ProjectSavePayload {
   description?: string
   tags?: string
   language?: string
-  stars?: number
-  forks?: number
   repoUrl?: string | null
   featured?: boolean
   status?: ProjectStatus
@@ -398,7 +399,7 @@ export interface ProjectSavePayload {
 export interface ProjectSaveResponse extends ProjectFacets {
   project: ProjectItem
   changed?: boolean
-  /** 服务端改动的字段中文名，用于「已保存：名称、Stars」这类回执 */
+  /** 服务端改动的字段中文名，用于「已保存：名称、仓库地址」这类回执 */
   fields?: string[]
 }
 

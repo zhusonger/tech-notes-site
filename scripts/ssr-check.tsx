@@ -50,8 +50,13 @@ const cases: RouteCase[] = [
       content.sections.about.experience[0].company,
       content.sections.about.stats[0].value,
       content.sections.about.skills[0],
-      content.projects[0].title,
-      content.posts[0].title,
+      content.sections.stack.items[0].name,
+      /*
+       * 文章与项目已不再从种子派生（内容以库为准，`shared/content.mjs` 里
+       * 那两项是空数组），所以这里只能断言**区块骨架仍在**：标题与「全部项目 /
+       * 查看全部」两个入口照常渲染，只是列表为空。真要验证列表渲染，看下面
+       * `ArticleCard` / `ProjectCard` 两个组件级用例。
+       */
       '关于我',
       '技术栈',
       '精选项目',
@@ -60,36 +65,26 @@ const cases: RouteCase[] = [
   },
   {
     path: '/blog',
-    expect: ['技术笔记', '全部文章', '把重复操作封装成可复用的技能', '单机跑十个服务的资源分配实践'],
     /*
-     * 两条排除断言：
-     * - 「订阅更新」的订阅表单已移除（页脚另有入口），列表页内不重复；
-     * - 兜底内容 6 篇、每页 6 篇，只有一页 —— 分页条必须**如实隐藏**。
-     *   此前它是一排点不动的假按钮（点「2」不动、点「下一页」不动），
-     *   现在分页是真的，且不满一页时不渲染。加了第 7 篇后这条会失败，
-     *   那时候正需要人回来看一眼分页是否还成立。
+     * 兜底内容是空的（文章只活在库里），所以列表页必须走**空态**：给出「没有匹配的
+     * 文章」而不是一片空白，分页条也不渲染。分类筛选条只剩「全部」一项。
      */
+    expect: ['技术笔记', '全部文章', '没有匹配的文章'],
     reject: ['订阅更新', '上一页', '下一页'],
   },
   {
+    /*
+     * 兜底里没有文章（内容以库为准），而 SSR 不跑 `useEffect`、也没有网络 ——
+     * 文章页在这个阶段拿到的只能是骨架屏，一个字都不会渲染出来。
+     * 所以这三条只剩**排除**断言可用：任何时候都不许把别的文章的正文顶上来。
+     * 「没有这篇文章」是浏览器里真的取到 404 之后才显示的状态，不在此处断言。
+     */
     path: '/blog/reusable-skill',
-    expect: [
-      '工具链',
-      '重复劳动的三个信号',
-      '拆成三段来做',
-      '回看这次封装',
-      '附：完整脚本与参数说明',
-      '目录',
-      '相关文章',
-      '上一篇',
-      '标签',
-    ],
-    // 这是最新的一篇，没有「更新的」可指向 —— 宁可少一格，也不拿别的文章凑数
-    reject: ['下一篇'],
+    reject: ['重复劳动的三个信号', '回看这次封装', '拆成三段来做'],
   },
   {
     path: '/blog/self-hosted-ci-traps',
-    expect: ['上一篇', '下一篇', '这篇的正文尚未撰写'],
+    reject: ['重复劳动的三个信号', '回看这次封装', '拆成三段来做'],
   },
   {
     /*
@@ -99,7 +94,15 @@ const cases: RouteCase[] = [
     path: '/blog/does-not-exist',
     reject: ['重复劳动的三个信号', '回看这次封装', '拆成三段来做'],
   },
-  { path: '/projects', expect: ['开源项目', '全部作品', '1.2k', 'Python', '技能库与自动化工作流集'] },
+  {
+    /*
+     * 项目同样不再由种子提供，所以这里只锁页面骨架与「没有 star / fork 字样」：
+     * 前者保证空列表时页面不崩，后者是上一轮移除 stars / forks 的回归锁。
+     */
+    path: '/projects',
+    expect: ['开源项目', '全部作品'],
+    reject: ['stars', 'forks'],
+  },
   {
     path: '/resume',
     expect: [
@@ -384,6 +387,7 @@ const pages: { name: string; render: () => string; expect: string[]; reject?: st
      * 断言三件事：
      *   1. 页头与副标题在位，且副标题的计数是**真实数字**拼的（这里没有数据，就是 0）
      *      ——「20 个项目 · 6 个精选 · 6.8k stars」是画布上的示意值，不能照抄；
+     *      其中「累计 stars」这一项已经不存在了（项目上没有可依赖的 star 数据源），
      *   2. 排序默认落在「按排序权重」上，且此时拖拽是**可用**的（副标题说的是拖拽）；
      *   3. 编辑弹层没有自己打开 —— 它只由 `?new=1` 或点卡片触发。
      */
@@ -573,10 +577,6 @@ const pages: { name: string; render: () => string; expect: string[]; reject?: st
             description: '个人技术主页与内容后台',
             tags: 'React · Express',
             language: 'TypeScript',
-            stars: 12,
-            starsLabel: '12',
-            forks: 3,
-            forksLabel: '3',
             repoUrl: 'https://github.com/example/repo',
             featured: true,
           }}
@@ -602,10 +602,6 @@ const pages: { name: string; render: () => string; expect: string[]; reject?: st
             description: '后台允许仓库地址留空',
             tags: 'Go',
             language: 'Go',
-            stars: 0,
-            starsLabel: '0',
-            forks: 0,
-            forksLabel: '0',
             repoUrl: null,
             featured: false,
           }}
@@ -617,6 +613,28 @@ const pages: { name: string; render: () => string; expect: string[]; reject?: st
 ]
 
 let failures = 0
+
+/*
+ * 内容以库为准：`shared/content.mjs` 里不能再放文章 / 项目 / 分类 / 标签 / 媒体。
+ *
+ * 种子曾经是「表为空就灌」的，于是把库清空之后下次启动这批示例条目又全回来了 ——
+ * 「删干净」这件事永远不生效。现在它们必须保持空；谁往回加一条，这条就红。
+ *
+ * `media` 不在此列：那是随镜像发布的静态素材登记，后台删不掉（来源门 409），
+ * 所以它不会造成「删了又回来」的错觉 —— 详见 `shared/content.mjs` 里该项的注释。
+ */
+const seededItems: [string, unknown[]][] = [
+  ['文章', content.posts],
+  ['项目', content.projects],
+  ['分类', content.categories],
+  ['标签', content.tags],
+]
+for (const [label, list] of seededItems) {
+  if (list.length > 0) {
+    failures += 1
+    console.log(`FAIL  种子${label}必须为空（内容以数据库为准）— 当前 ${list.length} 条`)
+  }
+}
 
 /** 三个维度共用一份：渲染不抛错 → expect 全命中 → reject 全不命中。 */
 function verify(label: string, render: () => string, expect: string[] = [], reject?: string[]) {

@@ -13,7 +13,6 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { content } from '../shared/content.mjs'
-import { readingLabel } from '../shared/derive.mjs'
 
 export const projectRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 
@@ -209,8 +208,6 @@ db.exec(`
     description TEXT    NOT NULL DEFAULT '',
     tags        TEXT    NOT NULL DEFAULT '',
     language    TEXT    NOT NULL DEFAULT '',
-    stars       INTEGER NOT NULL DEFAULT 0,
-    forks       INTEGER NOT NULL DEFAULT 0,
     repo_url    TEXT,
     -- 首页「精选项目」按它取；全部未标记时前台退化为按 sort_order 取前 3
     featured    INTEGER NOT NULL DEFAULT 0,
@@ -305,6 +302,27 @@ function ensureColumn(table, column, ddl) {
 }
 ensureColumn('projects', 'featured', 'featured INTEGER NOT NULL DEFAULT 0')
 
+/*
+ * 反向的那一半：删掉不再存在的列。
+ *
+ * `stars` / `forks` 是手填的示意值（GitHub 上的展示口径照抄过来，但根本没有数据源），
+ * 写多少都是编的，所以整列拿掉：建库语句里已经没有它，这里只负责已经存在的老库。
+ *
+ * 与 ensureColumn 同理不做通用迁移框架。DROP COLUMN 需要 SQLite ≥ 3.35，
+ * 更老的版本会失败 —— 那种情况就留着两列空壳，反正没有任何代码再读写它们。
+ */
+function dropColumn(table, column) {
+  const exists = db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column)
+  if (!exists) return
+  try {
+    db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`)
+  } catch {
+    /* 不支持删列的 SQLite：留着无害 */
+  }
+}
+dropColumn('projects', 'stars')
+dropColumn('projects', 'forks')
+
 // ----------------------------------------------------------------- 查询助手
 export const all = (sql, ...params) => db.prepare(sql).all(...params)
 export const get = (sql, ...params) => db.prepare(sql).get(...params)
@@ -324,100 +342,26 @@ export function tx(fn) {
 
 // ----------------------------------------------------------------- 种子数据
 /**
- * 幂等：只在表为空时灌入，绝不覆盖后台已经改过的内容。
+ * 只补**配置**，不补内容。
  *
- * 内容来自 `shared/content.mjs` —— 与前台兜底同一份，所以「断网时看到的」
- * 与「首次建库后的」在结构上必然一致。
+ * 分类、标签、文章、项目、媒体这五张表**一概不写**：它们是内容，以数据库为准。
+ * 早先这里是「表为空就把 `shared/content.mjs` 里的示例条目灌进去」，于是把库清空之后
+ * 下次启动它们又全回来了 —— 在后台删干净这件事永远不生效，看起来像删除没保存。
+ * 内容只由后台录入，也只活在库里；`shared/content.mjs` 里那几个导出已相应留空。
+ *
+ * 仍然回灌的有两类，性质都不是内容：
+ *   - `settings` / `sections`：让站点跑得起来的默认配置（品牌、SEO、首页文案、简历），
+ *     后台没有删除入口，逐个键补缺失值不会覆盖任何编辑。
+ *   - `media`：随镜像发布的静态素材登记；后台对它一律 409（删不掉），
+ *     所以「删了又回来」这件事在这里不成立，反而需要它存在才能验证来源门。
+ *
+ * 幂等：只在表为空 / 键缺失时写入，绝不覆盖后台已经改过的值。
  */
 export function seedIfEmpty() {
   const ts = nowIso()
-  const counts = { posts: 0, projects: 0, categories: 0, tags: 0, media: 0, settings: 0, sections: 0 }
+  const counts = { media: 0, settings: 0, sections: 0 }
 
   tx(() => {
-    if (get('SELECT COUNT(*) AS n FROM categories').n === 0) {
-      content.categories.forEach((name, i) => {
-        run(
-          'INSERT INTO categories (name, slug, description, sort_order, created_at) VALUES (?, ?, ?, ?, ?)',
-          name,
-          slugify(name),
-          '',
-          i,
-          ts
-        )
-        counts.categories += 1
-      })
-    }
-
-    // 标签必须先于文章写入：文章的标签是查现有标签表建立关联的
-    if (get('SELECT COUNT(*) AS n FROM tags').n === 0) {
-      for (const name of content.tags) {
-        run('INSERT INTO tags (name, slug, created_at) VALUES (?, ?, ?)', name, slugify(name), ts)
-        counts.tags += 1
-      }
-    }
-
-    if (get('SELECT COUNT(*) AS n FROM posts').n === 0) {
-      for (const p of content.posts) {
-        /*
-         * seo_description 留 NULL 而不是空串：仪表盘按 IS NULL OR = '' 统计
-         * 「待补充 SEO 摘要」，空串会让这条待办与「已填但填空格」混在一起。
-         */
-        const info = run(
-          `INSERT INTO posts (slug, title, category, excerpt, body, status, views, reading_time,
-                              cover_image, seo_description, published_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          p.slug,
-          p.title,
-          p.category ?? '',
-          p.excerpt ?? '',
-          p.body ?? '',
-          p.status ?? 'published',
-          Number(p.views) || 0,
-          readingLabel(p.body),
-          p.coverImage ?? null,
-          p.seoDescription ? p.seoDescription : null,
-          p.publishedAt,
-          p.publishedAt,
-          p.publishedAt
-        )
-        const postId = Number(info.lastInsertRowid)
-        for (const tagName of p.tags ?? []) {
-          const tag = get('SELECT id FROM tags WHERE name = ?', tagName)
-          if (tag) run('INSERT OR IGNORE INTO post_tags (post_id, tag_id) VALUES (?, ?)', postId, tag.id)
-        }
-        counts.posts += 1
-      }
-    }
-
-    if (get('SELECT COUNT(*) AS n FROM projects').n === 0) {
-      content.projects.forEach((p, i) => {
-        run(
-          `INSERT INTO projects (slug, title, description, tags, language, stars, forks, repo_url,
-                                 featured, status, sort_order, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, ?)`,
-          p.slug,
-          p.title,
-          p.description ?? '',
-          p.tags ?? '',
-          p.language ?? '',
-          Number(p.stars) || 0,
-          Number(p.forks) || 0,
-          /*
-           * 没有仓库地址就留空，**不合成**一个看起来能点的链接。
-           * 早先这里按 slug 拼 `https://github.com/<用户名>/<slug>`，于是每张项目卡片
-           * 都挂着一条 404 —— 比「没有链接」更糟：读者会以为自己点错了，
-           * 而真正的原因是这条地址从来不存在。前台对空值不渲染链接。
-           */
-          p.repoUrl ?? null,
-          p.featured ? 1 : 0,
-          p.sortOrder ?? i,
-          ts,
-          ts
-        )
-        counts.projects += 1
-      })
-    }
-
     if (get('SELECT COUNT(*) AS n FROM media').n === 0) {
       for (const m of content.media) {
         run(
