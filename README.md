@@ -347,27 +347,36 @@ public/images/        配图
 
 ## 已实现功能
 
-**前台（5 页）**：首页（首屏 / 关于我 / 技术栈 / 精选项目 / 最新博客）、博客列表（分类筛选与搜索）、
-文章详情（目录、上下篇、相关文章、作者卡）、项目、简历（五节结构）。响应式布局，内容取自
-`/api/content`；接口不可用时回落兜底内容，并在页头明示降级。
+**前台（5 页）** —— 响应式布局，内容取自 `/api/content`；接口不可用时回落兜底内容，
+并在页头明示降级。
 
-**后台内容管理（14 屏）**：
+| 页面 | 功能 | 界面 |
+| --- | --- | --- |
+| 首页 `/` | 首屏、关于我、技术栈、精选项目、最新博客 | <img src="docs/screenshots/home.jpg" width="240" alt="首页"> |
+| 博客列表 `/blog` | 分类筛选、标签、搜索 | <img src="docs/screenshots/blog.jpg" width="240" alt="博客列表"> |
+| 文章详情 `/blog/:slug` | 正文、目录、上下篇、相关文章、作者卡 | <img src="docs/screenshots/article.jpg" width="240" alt="文章详情"> |
+| 项目 `/projects` | 卡片墙、语言筛选、仓库链接 | <img src="docs/screenshots/projects.jpg" width="240" alt="项目"> |
+| 简历 `/resume` | 个人概述 / 核心竞争力 / 工作经历 / 核心技能 / 联系方式 | <img src="docs/screenshots/resume.jpg" width="240" alt="简历"> |
 
-| 屏 | 能做什么 |
-| --- | --- |
-| 仪表盘 | 内容概览与访问趋势 |
-| 文章列表 | 筛选、批量发布 / 下架 / 移入回收站 / 还原 / 删除 |
-| 文章编辑器 | Markdown 正文、封面、摘要、分类与标签、草稿与发布 |
-| 项目 | 卡片墙、拖拽排序、上下架与精选、批量操作 |
-| 首页内容 | 首屏 / 关于我 / 技术栈三个模块整份编辑 |
-| 简历编辑 | 五节内容编辑，模块顺序与显隐独立控制 |
-| 媒体库 | 上传、替代文本、按磁盘真值显示体积与尺寸、删除前扫描引用 |
-| 分类与标签 | 分类改名连带文章与排序；标签近重复分组与合并 |
-| 访客记录 | 按 IP 聚合的地区 / 设备 / 访问明细，时间筛选与分页 |
-| 操作日志 | 白名单式动作目录（码 → 中文句式），只记真实改动 |
-| 站点设置 | 品牌、页脚、社交链接、作者资料等声明式字段 |
-| 账号设置 / 账号安全 | 改密、改邮箱、TOTP 两步验证与恢复码 |
-| 两步验证 | TOTP 绑定与校验 |
+**后台（14 屏）**
+
+| 屏 | 功能 | 界面 |
+| --- | --- | --- |
+| 登录 `/admin/login` | 邮箱 + 口令登录，失败限流 | <img src="docs/screenshots/admin-login.jpg" width="240" alt="登录"> |
+| 仪表盘 `/admin` | 内容概览与访问趋势 | <img src="docs/screenshots/admin-dashboard.jpg" width="240" alt="仪表盘"> |
+| 文章列表 `/admin/posts` | 筛选、批量发布 / 下架 / 回收站 / 还原 / 删除 | <img src="docs/screenshots/admin-posts.jpg" width="240" alt="文章列表"> |
+| 文章编辑器 `/admin/posts/new` | Markdown 正文、封面、摘要、分类与标签、草稿与发布 | <img src="docs/screenshots/admin-post-editor.jpg" width="240" alt="文章编辑器"> |
+| 项目 `/admin/projects` | 卡片墙、拖拽排序、上下架与精选、批量操作 | <img src="docs/screenshots/admin-projects.jpg" width="240" alt="项目管理"> |
+| 首页内容 `/admin/home` | 首屏 / 关于我 / 技术栈三个模块整份编辑 | <img src="docs/screenshots/admin-home.jpg" width="240" alt="首页内容"> |
+| 简历编辑 `/admin/resume` | 五节内容编辑，模块顺序与显隐独立控制 | <img src="docs/screenshots/admin-resume.jpg" width="240" alt="简历编辑"> |
+| 媒体库 `/admin/media` | 上传、替代文本、按磁盘真值显示体积与尺寸、删除前扫描引用 | <img src="docs/screenshots/admin-media.jpg" width="240" alt="媒体库"> |
+| 分类与标签 `/admin/taxonomy` | 分类改名连带文章与排序；标签近重复分组与合并 | <img src="docs/screenshots/admin-taxonomy.jpg" width="240" alt="分类与标签"> |
+| 访客记录 `/admin/visitors` | 按 IP 聚合的地区 / 设备 / 访问明细，时间筛选与分页 | <img src="docs/screenshots/admin-visitors.jpg" width="240" alt="访客记录"> |
+| 操作日志 `/admin/audit` | 白名单式动作目录（码 → 中文句式），只记真实改动 | <img src="docs/screenshots/admin-audit.jpg" width="240" alt="操作日志"> |
+| 站点设置 `/admin/settings` | 品牌、页脚、社交链接、作者资料等声明式字段 | <img src="docs/screenshots/admin-settings.jpg" width="240" alt="站点设置"> |
+| 账号设置 `/admin/account` | 改显示名、邮箱与口令 | <img src="docs/screenshots/admin-account.jpg" width="240" alt="账号设置"> |
+| 账号安全 `/admin/security` | TOTP 两步验证绑定、恢复码、会话管理 | <img src="docs/screenshots/admin-security.jpg" width="240" alt="账号安全"> |
+| 两步验证 `/admin/2fa` | 登录第二步的 TOTP 校验 | 需先绑定两步验证才会出现 |
 
 **安全与隐私**：helmet 与 CSP、CSRF 同源校验、三段登录限流、httpOnly 会话、TOTP 与恢复码；
 正文渲染成 React 节点而非 HTML 字符串（无 `dangerouslySetInnerHTML`）；
