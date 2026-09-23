@@ -10,50 +10,15 @@
 
 ## 预览
 
-**前台**
+**前台** —— 首页 → 博客列表 → 文章详情，滚动浏览
 
-<table>
-  <tr>
-    <td width="50%"><img src="docs/screenshots/home.jpg" alt="首页"></td>
-    <td width="50%"><img src="docs/screenshots/blog.jpg" alt="博客列表"></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/article.jpg" alt="文章详情"></td>
-    <td><img src="docs/screenshots/projects.jpg" alt="项目"></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/resume.jpg" alt="简历"></td>
-    <td><img src="docs/screenshots/admin-login.jpg" alt="后台登录"></td>
-  </tr>
-</table>
+<img src="docs/screenshots/preview-front.gif" width="720" alt="前台演示">
 
-**后台**
+**后台** —— 登录 → 仪表盘 → 文章列表 → 新建文章编辑
 
-<table>
-  <tr>
-    <td width="50%"><img src="docs/screenshots/admin-dashboard.jpg" alt="仪表盘"></td>
-    <td width="50%"><img src="docs/screenshots/admin-posts.jpg" alt="文章列表"></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/admin-post-editor.jpg" alt="文章编辑器"></td>
-    <td><img src="docs/screenshots/admin-projects.jpg" alt="项目管理"></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/admin-home.jpg" alt="首页内容编辑"></td>
-    <td><img src="docs/screenshots/admin-resume.jpg" alt="简历编辑"></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/admin-media.jpg" alt="媒体库"></td>
-    <td><img src="docs/screenshots/admin-taxonomy.jpg" alt="分类与标签"></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/admin-visitors.jpg" alt="访客记录"></td>
-    <td><img src="docs/screenshots/admin-audit.jpg" alt="操作日志"></td>
-  </tr>
-  <tr>
-    <td colspan="2"><img src="docs/screenshots/admin-settings.jpg" alt="站点设置"></td>
-  </tr>
-</table>
+<img src="docs/screenshots/preview-admin.gif" width="720" alt="后台演示">
+
+各屏的完整静态图见下方「已实现功能」，功能与截图逐行对应。
 
 ## 特性
 
